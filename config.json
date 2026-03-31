@@ -1,0 +1,60 @@
+{
+    "image_size": [512, 512],
+    "seed": 1869,
+
+    "scene": {
+        "num_shapes_range": [5, 15],
+        "shape_types": ["circle", "rectangle", "triangle", "ellipse"],
+        "depth_range": [1.0, 5.0],
+        "background_depth": 6.0,
+        "max_shape_fraction": 0.4
+    },
+
+    "flash": {
+        "flash_power": 800.0,
+        "flash_position": [256, 256, 0.0],
+        "falloff_exponent": 2.0,
+        "specular_strength": 0.6,
+        "specular_shininess": 40.0,
+        "shadow_softness": 3.0,
+        "ambient_in_flash": 0.05
+    },
+
+    "ambient": {
+        "base_illumination": 0.18,
+        "illumination_variation": 0.08,
+        "color_temperature_shift": [1.0, 0.95, 0.85]
+    },
+
+    "noise": {
+        "ambient_noise_std": 0.035,
+        "flash_noise_std": 0.008,
+        "poisson_enabled": true,
+        "poisson_peak": 200.0
+    },
+
+    "generation": {
+        "num_train": 100,
+        "num_val": 20,
+        "output_dir": "./data/synthetic"
+    },
+
+    "model": {
+        "encoder_channels": [64, 128, 256, 512],
+        "depth_encoder_channels": [16, 32, 64, 128],
+        "bottleneck_channels": 512,
+        "attention_heads": 4,
+        "decoder_channels": [256, 128, 64, 32],
+        "batch_size": 4,
+        "learning_rate": 1e-4,
+        "weight_decay": 1e-5,
+        "num_epochs": 200,
+        "loss_l1_weight": 1.0,
+        "loss_perceptual_weight": 0.1,
+        "loss_gate_reg_weight": 0.01,
+        "checkpoint_dir": "./checkpoints",
+        "log_interval": 10,
+        "val_interval": 5,
+        "num_workers": 4
+    }
+}
