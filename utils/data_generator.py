@@ -14,7 +14,42 @@ import cv2
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-from config import SyntheticDataConfig
+from utils.config import SyntheticDataConfig
+
+
+def kelvin_to_rgb_tint(temp: float) -> np.ndarray:
+    """Convert a color temperature (K) to a normalized RGB tint.
+
+    Uses Tanner Helland's approximation for the 1000-40000 K range.
+    The result is normalized so the max channel equals 1, giving a
+    relative color cast rather than an absolute intensity.
+    """
+    t = temp / 100.0
+
+    # Red
+    if t <= 66:
+        r = 255.0
+    else:
+        r = 329.698727446 * ((t - 60) ** -0.1332047592)
+
+    # Green
+    if t <= 66:
+        g = 99.4708025861 * np.log(t) - 161.1195681661
+    else:
+        g = 288.1221695283 * ((t - 60) ** -0.0755148492)
+
+    # Blue
+    if t >= 66:
+        b = 255.0
+    elif t <= 19:
+        b = 0.0
+    else:
+        b = 138.5177312231 * np.log(t - 10) - 305.0447927307
+
+    rgb = np.array([r, g, b], dtype=np.float64)
+    rgb = np.clip(rgb, 0.0, 255.0) / 255.0
+    rgb /= rgb.max()  # normalize so max channel = 1
+    return rgb
 
 
 @dataclass
@@ -40,6 +75,42 @@ class FlashNoFlashGenerator:
 
         # Pre-compute pixel coordinate grids
         self.yy, self.xx = np.mgrid[0:self.H, 0:self.W].astype(np.float64)
+
+        # Focal lengths in pixels (pinhole camera model)
+        fov_h_rad = np.radians(cfg.camera.fov_h)
+        fov_w_rad = np.radians(cfg.camera.fov_w)
+        self.focal_y = (self.H / 2.0) / np.tan(fov_h_rad / 2.0)
+        self.focal_x = (self.W / 2.0) / np.tan(fov_w_rad / 2.0)
+
+        # Per-sample parameters (re-sampled each call to generate())
+        self._p = {}
+
+    def _sample_params(self) -> None:
+        """Sample concrete parameter values from config ranges for one scene."""
+        r = self.rng.uniform
+        fcfg = self.cfg.flash
+        acfg = self.cfg.ambient
+        ncfg = self.cfg.noise
+
+        self._p = {
+            "background_depth": r(*self.cfg.scene.background_depth),
+            "flash_position": (r(*fcfg.flash_position_x), r(*fcfg.flash_position_y), r(*fcfg.flash_position_z)),
+            "flash_power": r(*fcfg.flash_power),
+            "falloff_exponent": r(*fcfg.falloff_exponent),
+            "specular_strength": r(*fcfg.specular_strength),
+            "specular_shininess": r(*fcfg.specular_shininess),
+            "shadow_softness": r(*fcfg.shadow_softness),
+            "ambient_in_flash": r(*fcfg.ambient_in_flash),
+            "flash_color_tint": kelvin_to_rgb_tint(r(*fcfg.flash_color_temp)),
+            "base_illumination": r(*acfg.base_illumination),
+            "illumination_variation": r(*acfg.illumination_variation),
+            "color_temperature_shift": np.array([r(*ch) for ch in acfg.color_temperature_shift]),
+            "fog_strength": r(*acfg.fog_strength),
+            "no_flash_darken": r(*acfg.no_flash_darken),
+            "ambient_noise_std": r(*ncfg.ambient_noise_std),
+            "flash_noise_std": r(*ncfg.flash_noise_std),
+            "poisson_peak": r(*ncfg.poisson_peak),
+        }
 
     # ------------------------------------------------------------------
     # Scene construction
@@ -121,7 +192,7 @@ class FlashNoFlashGenerator:
         # Background
         bg_color = self.rng.uniform(0.05, 0.6, size=3)
         reflectance = np.ones((H, W, 3), dtype=np.float64) * bg_color
-        depth_map = np.full((H, W), self.cfg.scene.background_depth, dtype=np.float64)
+        depth_map = np.full((H, W), self._p["background_depth"], dtype=np.float64)
 
         # Surface normal z-component (1 = facing camera, <1 = angled away)
         surface_cos = np.ones((H, W), dtype=np.float64)
@@ -159,7 +230,7 @@ class FlashNoFlashGenerator:
         shadowed and 1 = fully lit.
         """
         H, W = self.H, self.W
-        flash_x, flash_y, _ = self.cfg.flash.flash_position
+        flash_x, flash_y, _ = self._p["flash_position"]
         shadow = np.ones((H, W), dtype=np.float64)
 
         # For each pixel, trace a ray back toward the flash and check if
@@ -177,7 +248,7 @@ class FlashNoFlashGenerator:
             shadow[occluded] *= 0.85  # Accumulate partial occlusion
 
         # Soften shadow edges
-        softness = self.cfg.flash.shadow_softness
+        softness = self._p["shadow_softness"]
         if softness > 0:
             shadow = gaussian_filter(shadow, sigma=softness)
 
@@ -197,17 +268,18 @@ class FlashNoFlashGenerator:
         diffuse  : (H, W) diffuse flash contribution
         specular : (H, W) specular highlight map
         """
-        fcfg = self.cfg.flash
-        power = fcfg.flash_power
-        exp = fcfg.falloff_exponent
+        power = self._p["flash_power"]
+        exp = self._p["falloff_exponent"]
 
-        # Distance from each pixel to flash source (in image-space + depth)
-        fx, fy, fz = fcfg.flash_position
-        dx = self.xx - fx
-        dy = self.yy - fy
-        dz = depth_map - fz
+        # Distance from each pixel to flash source (all in metres).
+        # Convert pixel offsets to metres using focal length and depth.
+        fx, fy, fz = self._p["flash_position"]
+        focal = (self.focal_x + self.focal_y) / 2.0
+        dx = (self.xx - fx) / focal * depth_map  # lateral offset in metres
+        dy = (self.yy - fy) / focal * depth_map  # lateral offset in metres
+        dz = depth_map - fz                       # depth offset in metres
         dist = np.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
-        dist = np.maximum(dist, 1.0)  # avoid division by zero
+        dist = np.maximum(dist, 0.1)  # avoid division by zero
 
         # Inverse-power falloff
         falloff = power / (dist ** exp)
@@ -221,11 +293,11 @@ class FlashNoFlashGenerator:
             diffuse /= d_max
 
         # Specular highlights (Blinn-Phong-like)
-        # Approximate half-vector dot normal as function of distance to flash center
-        center_dist = np.sqrt(dx ** 2 + dy ** 2)
-        center_dist_norm = center_dist / max(self.W, self.H)
-        specular_raw = np.exp(-fcfg.specular_shininess * center_dist_norm ** 2)
-        specular = fcfg.specular_strength * specular_raw * surface_cos * shadow_map
+        # Approximate half-vector dot normal as angular offset from flash axis
+        lateral_dist = np.sqrt(dx ** 2 + dy ** 2)
+        angular_offset = lateral_dist / np.maximum(dz, 0.1)  # tan(angle) ≈ angle for small angles
+        specular_raw = np.exp(-self._p["specular_shininess"] * angular_offset ** 2)
+        specular = self._p["specular_strength"] * specular_raw * surface_cos * shadow_map
 
         return diffuse, specular
 
@@ -233,24 +305,123 @@ class FlashNoFlashGenerator:
     # Ambient illumination model
     # ------------------------------------------------------------------
 
-    def _ambient_illumination(self) -> np.ndarray:
-        """Create a smooth, low-level ambient light field (H, W, 3).
+    def _ambient_illumination(self, depth_map: np.ndarray, surface_cos: np.ndarray) -> np.ndarray:
+        """Create a depth-aware ambient light field (H, W, 3).
 
-        Simulates soft environmental lighting with slight spatial variation
-        and warm/cool colour shift.
+        Three layers combine to produce realistic ambient illumination:
+
+        1. Base fill — smooth, low-level illumination with spatial noise.
+           This represents indirect light bouncing off walls/ceiling.
+
+        2. Room lights — 1-3 point light sources at random (x, y, depth)
+           positions, each with its own color and inverse-power falloff.
+           A Lambertian cos(θ) term modulates each light based on the
+           angle between the light direction and the surface normal,
+           so surfaces facing toward a lamp are brighter than those
+           angled away.
+
+        3. Depth fog — a small additive haze that increases with distance.
+           Simulates indoor atmospheric scattering (dust, moisture) that
+           washes out far objects and reduces their contrast.
         """
-        acfg = self.cfg.ambient
         H, W = self.H, self.W
+        acfg = self.cfg.ambient
 
-        # Smooth random illumination field
-        base = np.full((H, W), acfg.base_illumination, dtype=np.float64)
-        variation = self.rng.normal(0, acfg.illumination_variation, size=(H, W))
+        # ----------------------------------------------------------
+        # Layer 1: Base fill light (depth-independent)
+        # A uniform low illumination with smooth spatial variation,
+        # simulating indirect bounced light in a room.
+        # ----------------------------------------------------------
+        base = np.full((H, W), self._p["base_illumination"], dtype=np.float64)
+        variation = self.rng.normal(0, self._p["illumination_variation"], size=(H, W))
         variation = gaussian_filter(variation, sigma=40.0)
-        illum = np.clip(base + variation, 0.02, 0.4)
+        fill = np.clip(base + variation, 0.02, 0.4)
 
-        # Apply colour temperature shift
-        ct = np.array(acfg.color_temperature_shift, dtype=np.float64)
-        ambient_light = illum[:, :, None] * ct[None, None, :]
+        # Expand to 3 channels (neutral — no colour cast on clean target)
+        ambient_light = fill[:, :, None] * np.ones(3)[None, None, :]
+
+        # ----------------------------------------------------------
+        # Layer 2: Random room lights (depth-dependent)
+        # Each light is placed at a random (x, y) pixel position and
+        # a random depth.  The 3D distance from every pixel to the
+        # light determines the contribution via inverse-power falloff.
+        # This creates soft gradients — nearby surfaces are brighter,
+        # giving the ambient image real depth structure.
+        # ----------------------------------------------------------
+        lo, hi = acfg.num_room_lights_range
+        n_lights = int(self.rng.integers(lo, hi + 1))
+        focal = (self.focal_x + self.focal_y) / 2.0
+
+        for _ in range(n_lights):
+            # Random position for this room light
+            lx = self.rng.uniform(0, W)
+            ly = self.rng.uniform(0, H)
+            lz = self.rng.uniform(*acfg.room_light_depth)
+
+            # Random power and falloff exponent for this light
+            power = self.rng.uniform(*acfg.room_light_power)
+            falloff_exp = self.rng.uniform(*acfg.room_light_falloff)
+
+            # Random warm/cool color for this light (slight tint)
+            light_color = self.rng.uniform(0.8, 1.2, size=3)
+            light_color /= light_color.max()  # normalise so max channel = 1
+
+            # 3D distance from every pixel to this light.
+            # Convert pixel offsets to the same scale as depth using
+            # the focal length, so dx/dy/dz are all in metres.
+            dx = (self.xx - lx) / focal
+            dy = (self.yy - ly) / focal
+            dz = depth_map - lz
+            dist = np.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
+            dist = np.maximum(dist, 0.01)
+
+            # Lambertian cos(θ) — angle between light direction and
+            # surface normal.  The surface normal approximation
+            # (surface_cos) gives the z-component facing the camera.
+            # The light direction z-component at each pixel is dz/dist
+            # (how much the light ray points along the depth axis).
+            # Combining: surfaces that face toward the light receive
+            # more illumination, surfaces angled away receive less.
+            # We mix with a base of 0.3 so no surface goes fully dark
+            # — real room light bounces off walls and fills in.
+            light_cos = np.clip(dz / dist, 0.0, 1.0)
+            lambertian = 0.3 + 0.7 * light_cos * surface_cos
+
+            # Inverse-power falloff: closer surfaces get more light
+            contribution = power * lambertian / (dist ** falloff_exp)
+
+            # Smooth the contribution to simulate a soft/diffuse lamp
+            # rather than a harsh point source
+            contribution = gaussian_filter(contribution, sigma=acfg.room_light_softness)
+
+            # Add this light's contribution (coloured)
+            ambient_light += contribution[:, :, None] * light_color[None, None, :]
+
+        # ----------------------------------------------------------
+        # Layer 3: Depth fog / haze (depth-dependent)
+        # Distant objects pick up a small additive color from
+        # atmospheric scattering — dust, moisture, haze.  This
+        # washes out far objects (lower contrast) and tints them
+        # toward a neutral bluish-grey, encoding depth.
+        #
+        #   fog_amount = fog_strength * (depth / max_depth)
+        #   pixel = pixel * (1 - fog_amount) + fog_color * fog_amount
+        #
+        # We apply this as an additive/blend on the ambient light
+        # rather than on the final image so it interacts naturally
+        # with reflectance.
+        # ----------------------------------------------------------
+        fog_strength = self._p["fog_strength"]
+        if fog_strength > 0:
+            fog_color = np.array(acfg.fog_color, dtype=np.float64)
+            depth_max = depth_map.max()
+            if depth_max > 0:
+                fog_amount = fog_strength * (depth_map / depth_max)
+                # Blend: reduce ambient light and add fog color
+                ambient_light = (
+                    ambient_light * (1.0 - fog_amount[:, :, None])
+                    + fog_color[None, None, :] * fog_amount[:, :, None]
+                )
 
         return ambient_light
 
@@ -260,12 +431,11 @@ class FlashNoFlashGenerator:
 
     def _add_noise(self, image: np.ndarray, std: float) -> np.ndarray:
         """Add Gaussian + optional Poisson noise."""
-        ncfg = self.cfg.noise
         noisy = image.copy()
 
-        if ncfg.poisson_enabled:
+        if self.cfg.noise.poisson_enabled:
             # Scale to photon counts, apply Poisson, scale back
-            peak = ncfg.poisson_peak
+            peak = self._p["poisson_peak"]
             photons = noisy * peak
             photons = self.rng.poisson(np.clip(photons, 0, peak * 10)).astype(np.float64)
             noisy = photons / peak
@@ -280,6 +450,7 @@ class FlashNoFlashGenerator:
 
     def generate(self) -> SceneSample:
         """Generate one flash / no-flash pair with depth map."""
+        self._sample_params()
 
         # 1. Build the underlying scene
         reflectance, depth_map, surface_cos = self.build_scene()
@@ -287,21 +458,30 @@ class FlashNoFlashGenerator:
         # 2. Compute shadow map from depth occlusion
         shadow_map = self._cast_shadows(depth_map)
 
-        # 3. Flash image
-        diffuse, specular = self._flash_illumination(depth_map, surface_cos, shadow_map)
-        flash_light = diffuse[:, :, None] + specular[:, :, None]
-        flash_ambient_contrib = self.cfg.flash.ambient_in_flash
-        flash_clean = reflectance * flash_light + flash_ambient_contrib * reflectance
-        flash_clean = np.clip(flash_clean + specular[:, :, None] * 0.3, 0.0, 1.0)
-
-        # 4. Ambient / no-flash image
-        ambient_light = self._ambient_illumination()
+        # 3. Ambient / no-flash image (compute first so flash can reuse it)
+        ambient_light = self._ambient_illumination(depth_map, surface_cos)
         no_flash_clean = reflectance * ambient_light
         no_flash_clean = np.clip(no_flash_clean, 0.0, 1.0)
 
-        # 5. Add noise
-        flash_noisy = self._add_noise(flash_clean, self.cfg.noise.flash_noise_std)
-        no_flash_noisy = self._add_noise(no_flash_clean, self.cfg.noise.ambient_noise_std)
+        # 4. Flash image
+        diffuse, specular = self._flash_illumination(depth_map, surface_cos, shadow_map)
+        flash_tint = self._p["flash_color_tint"][None, None, :]  # (1, 1, 3)
+        flash_light = (diffuse[:, :, None] + specular[:, :, None]) * flash_tint
+        flash_ambient_contrib = self._p["ambient_in_flash"]
+        flash_clean = reflectance * flash_light + flash_ambient_contrib * no_flash_clean * flash_tint
+        flash_clean = np.clip(flash_clean + specular[:, :, None] * 0.3 * flash_tint, 0.0, 1.0)
+
+        # 5. Degrade the no-flash input: darken + colour shift + noise.
+        #    The clean target stays neutral; the input simulates a real
+        #    low-light capture with underexposure and wrong white balance.
+        darken = self._p["no_flash_darken"]
+        ct = self._p["color_temperature_shift"]
+        no_flash_degraded = no_flash_clean * darken * ct[None, None, :]
+        no_flash_degraded = np.clip(no_flash_degraded, 0.0, 1.0)
+
+        # 6. Add noise
+        flash_noisy = self._add_noise(flash_clean, self._p["flash_noise_std"])
+        no_flash_noisy = self._add_noise(no_flash_degraded, self._p["ambient_noise_std"])
 
         return SceneSample(
             scene=reflectance,

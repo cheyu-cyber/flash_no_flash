@@ -3,11 +3,10 @@
 Architecture overview
 ---------------------
 Two independent encoders extract multi-scale features from the flash and
-ambient (no-flash) images.  A lightweight depth encoder produces per-level
-conditioning features.  At each decoder level a *gated skip connection*
+ambient (no-flash) images.  At each decoder level a *gated skip connection*
 learns where to trust the ambient tone vs. the flash structure:
 
-    g_k = sigmoid(Conv([F_k, A_k, D_k]))
+    g_k = sigmoid(Conv([F_k, A_k]))
     skip_k = g_k * A_k + (1 - g_k) * F_k
 
 A single multi-head self-attention block at the bottleneck (32x32) provides
@@ -73,31 +72,6 @@ class Encoder(nn.Module):
         return x, skips          # x = pooled output after last level
 
 
-class DepthEncoder(nn.Module):
-    """Lightweight single-channel encoder for the depth map."""
-
-    def __init__(self, channels: Tuple[int, ...] = (16, 32, 64, 128)):
-        super().__init__()
-        self.levels = nn.ModuleList()
-        ch = 1
-        for out_ch in channels:
-            self.levels.append(nn.Sequential(
-                nn.Conv2d(ch, out_ch, 3, padding=1, bias=False),
-                nn.BatchNorm2d(out_ch),
-                nn.ReLU(inplace=True),
-            ))
-            ch = out_ch
-        self.pool = nn.MaxPool2d(2)
-
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
-        skips = []
-        for level in self.levels:
-            x = level(x)
-            skips.append(x)      # skip before pooling
-            x = self.pool(x)
-        return skips
-
-
 # ---------------------------------------------------------------------------
 # Bottleneck attention
 # ---------------------------------------------------------------------------
@@ -131,15 +105,15 @@ class BottleneckAttention(nn.Module):
 # ---------------------------------------------------------------------------
 
 class GatedSkipConnection(nn.Module):
-    """Depth-conditioned gate that blends flash and ambient features.
+    """Learned gate that blends flash and ambient features.
 
-    g = sigmoid(Conv([F, A, D]))
+    g = sigmoid(Conv([F, A]))
     output = g * A + (1 - g) * F
     """
 
-    def __init__(self, flash_ch: int, ambient_ch: int, depth_ch: int):
+    def __init__(self, flash_ch: int, ambient_ch: int):
         super().__init__()
-        total = flash_ch + ambient_ch + depth_ch
+        total = flash_ch + ambient_ch
         self.gate = nn.Sequential(
             nn.Conv2d(total, total // 4, 1, bias=False),
             nn.ReLU(inplace=True),
@@ -151,9 +125,8 @@ class GatedSkipConnection(nn.Module):
         self,
         f_skip: torch.Tensor,
         a_skip: torch.Tensor,
-        d_skip: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        g = self.gate(torch.cat([f_skip, a_skip, d_skip], dim=1))
+        g = self.gate(torch.cat([f_skip, a_skip], dim=1))
         fused = g * a_skip + (1 - g) * f_skip
         return fused, g
 
@@ -180,7 +153,7 @@ class DecoderLevel(nn.Module):
 # ---------------------------------------------------------------------------
 
 class GatedUNet(nn.Module):
-    """Dual-encoder gated U-Net with depth conditioning.
+    """Dual-encoder gated U-Net for flash / no-flash denoising.
 
     Parameters
     ----------
@@ -191,14 +164,12 @@ class GatedUNet(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         enc_ch = cfg.encoder_channels           # (64, 128, 256, 512)
-        dep_ch = cfg.depth_encoder_channels     # (16, 32, 64, 128)
         dec_ch = cfg.decoder_channels           # (256, 128, 64, 32)
         n_levels = len(enc_ch)
 
         # --- encoders ---
         self.flash_encoder = Encoder(3, enc_ch)
         self.ambient_encoder = Encoder(3, enc_ch)
-        self.depth_encoder = DepthEncoder(dep_ch)
 
         # --- bottleneck ---
         self.bottleneck_merge = nn.Sequential(
@@ -211,7 +182,7 @@ class GatedUNet(nn.Module):
 
         # --- gated skip connections (one per encoder level) ---
         self.gates = nn.ModuleList([
-            GatedSkipConnection(enc_ch[k], enc_ch[k], dep_ch[k])
+            GatedSkipConnection(enc_ch[k], enc_ch[k])
             for k in range(n_levels)
         ])
 
@@ -234,14 +205,12 @@ class GatedUNet(nn.Module):
         self,
         flash: torch.Tensor,
         no_flash: torch.Tensor,
-        depth: torch.Tensor,
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         """
         Parameters
         ----------
         flash    : (B, 3, H, W)
         no_flash : (B, 3, H, W)
-        depth    : (B, 1, H, W)
 
         Returns
         -------
@@ -251,7 +220,6 @@ class GatedUNet(nn.Module):
         # Encode
         f_out, f_skips = self.flash_encoder(flash)
         a_out, a_skips = self.ambient_encoder(no_flash)
-        d_skips = self.depth_encoder(depth)
 
         # Bottleneck
         x = torch.cat([f_out, a_out], dim=1)
@@ -263,7 +231,7 @@ class GatedUNet(nn.Module):
         n_levels = len(f_skips)
         gates: List[torch.Tensor] = []
         for i, k in enumerate(reversed(range(n_levels))):
-            fused_skip, g = self.gates[k](f_skips[k], a_skips[k], d_skips[k])
+            fused_skip, g = self.gates[k](f_skips[k], a_skips[k])
             gates.append(g)
             x = self.decoder_levels[i](x, fused_skip)
 

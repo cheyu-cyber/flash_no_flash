@@ -2,40 +2,59 @@
     "image_size": [512, 512],
     "seed": 1869,
 
+    "camera": {
+        "fov_h": 60.0,
+        "fov_w": 60.0
+    },
+
     "scene": {
-        "num_shapes_range": [5, 15],
+        "num_shapes_range": [6, 15],
         "shape_types": ["circle", "rectangle", "triangle", "ellipse"],
-        "depth_range": [1.0, 5.0],
-        "background_depth": 6.0,
+        "depth_range": [1.0, 7.0],
+        "background_depth": [10.0, 20.0],
         "max_shape_fraction": 0.4
     },
 
     "flash": {
-        "flash_power": 800.0,
-        "flash_position": [256, 256, 0.0],
-        "falloff_exponent": 2.0,
-        "specular_strength": 0.6,
-        "specular_shininess": 40.0,
-        "shadow_softness": 3.0,
-        "ambient_in_flash": 0.05
+        "flash_power": [600.0, 1100.0],
+        "flash_position_x": [200, 312],
+        "flash_position_y": [200, 312],
+        "flash_position_z": [0.0, 0.0],
+        "falloff_exponent": [1.0, 1.5],
+        "specular_strength": [0.3, 0.9],
+        "specular_shininess": [10.0, 40.0],
+        "shadow_softness": [1.5, 5.0],
+        "ambient_in_flash": [0.02, 0.1],
+        "flash_color_temp": [5000, 6000]
     },
 
     "ambient": {
-        "base_illumination": 0.18,
-        "illumination_variation": 0.08,
-        "color_temperature_shift": [1.0, 0.95, 0.85]
+        "base_illumination": [0.3, 0.7],
+        "illumination_variation": [0.04, 0.12],
+        "color_temperature_shift": [[0.9, 1.1], [0.85, 1.0], [0.75, 0.9]],
+
+        "num_room_lights_range": [0, 3],
+        "room_light_power": [0.5, 0.8],
+        "room_light_depth": [-3.0, 0.0],
+        "room_light_falloff": [0.5, 1.0],
+        "room_light_softness": 60.0,
+
+        "fog_strength": [0.0, 0.15],
+        "fog_color": [0.75, 0.75, 0.75],
+
+        "no_flash_darken": [0.3, 0.7]
     },
 
     "noise": {
-        "ambient_noise_std": 0.035,
-        "flash_noise_std": 0.008,
+        "ambient_noise_std": [0.02, 0.05],
+        "flash_noise_std": [0.004, 0.010],
         "poisson_enabled": true,
-        "poisson_peak": 200.0
+        "poisson_peak": [120.0, 300.0]
     },
 
     "generation": {
-        "num_train": 100,
-        "num_val": 20,
+        "num_train": 1000,
+        "num_val": 200,
         "output_dir": "./data/synthetic"
     },
 

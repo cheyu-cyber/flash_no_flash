@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from config import load_config, SyntheticDataConfig
+from utils.config import load_config, SyntheticDataConfig
 from utils.data_generator import FlashNoFlashGenerator, SceneSample
 
 
