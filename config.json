@@ -8,7 +8,7 @@
     },
 
     "scene": {
-        "num_shapes_range": [6, 15],
+        "num_shapes_range": [5, 20],
         "shape_types": ["circle", "rectangle", "triangle", "ellipse"],
         "depth_range": [1.0, 7.0],
         "background_depth": [10.0, 20.0],

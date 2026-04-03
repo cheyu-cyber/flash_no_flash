@@ -106,31 +106,37 @@ def bilateral_filter(
     radius:
         Local window radius. Defaults to ceil(3*sigma_d).
     """
-    image_cl, squeeze_gray = _to_channel_last(image)
-    h, w, c = image_cl.shape
+    h, w, c = image.shape
     radius = _default_radius(sigma_d) if radius is None else int(radius)
-
-    spatial = _spatial_kernel(radius, sigma_d)
-    padded = _reflect_pad(image_cl, radius)
-    out = np.zeros_like(image_cl)
+    # g_d(p' - p), a precomputed 2D Gaussian kernel based on σ_d
+    spatial = _spatial_kernel(radius, sigma_d) 
+    # # A_{p'} for p' in Omega
+    padded = np.pad(image, ((radius, radius), (radius, radius), (0, 0)), mode="reflect")
+    out = np.zeros_like(image)
 
     for y in range(h):
         for x in range(w):
-            center = padded[y + radius, x + radius]
-            patch = padded[y : y + 2 * radius + 1, x : x + 2 * radius + 1]
-
-            dist_range = _range_distance(center, patch)
-            range_w = np.asarray(_gaussian(dist_range, sigma_r), dtype=np.float64)
+            # A_p, the center pixel value at (y, x)
+            center = padded[y + radius, x + radius] 
+            # A_{p'}, the pixel values in the neighborhood around (y, x)
+            patch = padded[y : y + 2 * radius + 1, x : x + 2 * radius + 1] 
+            # A_{p'} - A_p
+            diff = patch - center 
+            dist_range = np.linalg.norm(diff, axis=-1)
+            # g_r(A_{p'} - A_p), the range weights based on intensity differences
+            range_w = np.asarray(_gaussian(dist_range, sigma_r), dtype=np.float64) 
+            # g_d(p' - p) * g_r(A_{p'} - A_p), the combined spatial and range weights
             weights = spatial * range_w
-            norm = np.sum(weights)
+            # k(p)
+            norm = np.sum(weights) 
             if norm <= 1e-12:
                 out[y, x] = center
                 continue
-
-            weighted_patch = patch * weights[..., None]
-            out[y, x] = np.sum(weighted_patch, axis=(0, 1)) / norm
-
-    return _from_channel_last(out, squeeze_gray)
+            # g_d(p' - p) * g_r(A_{p'} - A_p) * A_{p'}, the weighted pixel values in the neighborhood
+            weighted_patch = patch * weights[..., None] 
+            # (1 / k(p)) * sum_{p' in Omega} g_d(p' - p) g_r(A_{p'} - A_p) A_{p'}
+            out[y, x] = np.sum(weighted_patch, axis=(0, 1)) / norm 
+    return out
 
 
 
@@ -151,38 +157,46 @@ def joint_bilateral_filter(
     The ambient image A is averaged, but the range weight g_r is computed from
     the flash image F, exactly as described in the paper.
     """
-    ambient_cl, squeeze_gray = _to_channel_last(ambient)
-    flash_cl, _ = _to_channel_last(flash)
+    
 
-    if ambient_cl.shape != flash_cl.shape:
+    if ambient.shape != flash.shape:
         raise ValueError("ambient and flash must have the same shape")
 
-    h, w, _ = ambient_cl.shape
+    h, w, _ = ambient.shape
     radius = _default_radius(sigma_d) if radius is None else int(radius)
-
+    # g_d(p' - p), a precomputed 2D Gaussian kernel based on σ_d
     spatial = _spatial_kernel(radius, sigma_d)
-    ambient_pad = _reflect_pad(ambient_cl, radius)
-    flash_pad = _reflect_pad(flash_cl, radius)
-    out = np.zeros_like(ambient_cl)
+    # A_{p'} for p' in Omega and F_{p'} for p' in Omega
+    ambient_pad = np.pad(ambient, ((radius, radius), (radius, radius), (0, 0)), mode="reflect")
+    flash_pad = np.pad(flash, ((radius, radius), (radius, radius), (0, 0)), mode="reflect")
+    out = np.zeros_like(ambient)
 
     for y in range(h):
         for x in range(w):
+            # F_p, the center pixel value in the flash image at (y, x)
             flash_center = flash_pad[y + radius, x + radius]
+            # F_{p'}, the pixel values in the neighborhood around (y, x)
             flash_patch = flash_pad[y : y + 2 * radius + 1, x : x + 2 * radius + 1]
+            # A_{p'}, the pixel values in the neighborhood around (y, x)
             ambient_patch = ambient_pad[y : y + 2 * radius + 1, x : x + 2 * radius + 1]
-
-            dist_range = _range_distance(flash_center, flash_patch)
+            # F_{p'} - F_p
+            diff = flash_patch - flash_center
+            dist_range = np.linalg.norm(diff, axis=-1)
+            # g_r(F_{p'} - F_p), the range weights based on intensity differences
             range_w = np.asarray(_gaussian(dist_range, sigma_r), dtype=np.float64)
+            # g_d(p' - p) * g_r(F_{p'} - F_p)
             weights = spatial * range_w
+            # k(p)
             norm = np.sum(weights)
             if norm <= 1e-12:
                 out[y, x] = ambient_pad[y + radius, x + radius]
                 continue
-
+            # g_d(p' - p) * g_r(F_{p'} - F_p) * A_{p'}, the weighted pixel values in the neighborhood
             weighted_patch = ambient_patch * weights[..., None]
+            # (1 / k(p)) * sum_{p' in Omega} g_d(p' - p) g_r(F_{p'} - F_p) A_{p'}
             out[y, x] = np.sum(weighted_patch, axis=(0, 1)) / norm
 
-    return _from_channel_last(out, squeeze_gray)
+    return out
 
 
 __all__ = [

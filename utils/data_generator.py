@@ -178,6 +178,83 @@ class FlashNoFlashGenerator:
 
         return mask
 
+    # ------------------------------------------------------------------
+    # Texture generation
+    # ------------------------------------------------------------------
+
+    _TEXTURE_TYPES = ["noise", "stripes", "checkerboard", "gradient", "speckle"]
+
+    def _generate_texture(self, H: int, W: int) -> np.ndarray:
+        """Generate a single-channel texture pattern in [0, 1], shape (H, W).
+
+        A random texture type is chosen each call.  The result is meant to be
+        blended with a base colour to give spatial variation to a shape or
+        the background.
+        """
+        ttype = self.rng.choice(self._TEXTURE_TYPES)
+
+        if ttype == "noise":
+            # Smooth Perlin-like noise: random field + heavy Gaussian blur
+            raw = self.rng.standard_normal((H, W))
+            sigma = self.rng.uniform(8.0, 40.0)
+            tex = gaussian_filter(raw, sigma=sigma)
+            lo, hi = tex.min(), tex.max()
+            tex = (tex - lo) / (hi - lo + 1e-8)
+
+        elif ttype == "stripes":
+            angle = self.rng.uniform(0, np.pi)
+            freq = self.rng.uniform(0.02, 0.12)
+            yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+            phase = xx * np.cos(angle) + yy * np.sin(angle)
+            tex = 0.5 + 0.5 * np.sin(2 * np.pi * freq * phase)
+
+        elif ttype == "checkerboard":
+            block = self.rng.integers(8, 48)
+            yy, xx = np.mgrid[0:H, 0:W]
+            tex = ((yy // block) + (xx // block)) % 2
+            tex = tex.astype(np.float64)
+
+        elif ttype == "gradient":
+            angle = self.rng.uniform(0, 2 * np.pi)
+            yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+            proj = xx * np.cos(angle) + yy * np.sin(angle)
+            lo, hi = proj.min(), proj.max()
+            tex = (proj - lo) / (hi - lo + 1e-8)
+
+        else:  # speckle
+            density = self.rng.uniform(0.03, 0.20)
+            tex = (self.rng.random((H, W)) < density).astype(np.float64)
+            tex = gaussian_filter(tex, sigma=1.5)
+            lo, hi = tex.min(), tex.max()
+            tex = (tex - lo) / (hi - lo + 1e-8)
+
+        return tex
+
+    def _apply_texture(
+        self, base_color: np.ndarray, H: int, W: int, strength: float = 0.0
+    ) -> np.ndarray:
+        """Create a textured colour field (H, W, 3) from a base RGB colour.
+
+        Parameters
+        ----------
+        base_color : (3,) array in [0, 1]
+        strength   : blend factor, 0 = flat colour, 1 = full texture.
+                     If 0, a random value in [0.08, 0.35] is chosen.
+        """
+        if strength <= 0.0:
+            strength = float(self.rng.uniform(0.08, 0.35))
+        tex = self._generate_texture(H, W)
+        tex_color = self.rng.uniform(0.05, 0.95, size=3)
+        textured = (
+            (1 - strength) * base_color[None, None, :]
+            + strength * tex[:, :, None] * tex_color[None, None, :]
+        )
+        return np.clip(textured, 0.0, 1.0)
+
+    # ------------------------------------------------------------------
+    # Scene construction
+    # ------------------------------------------------------------------
+
     def build_scene(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Build a random scene: reflectance (H,W,3), depth (H,W), normals-z (H,W).
 
@@ -189,9 +266,9 @@ class FlashNoFlashGenerator:
         """
         H, W = self.H, self.W
 
-        # Background
+        # Background with texture
         bg_color = self.rng.uniform(0.05, 0.6, size=3)
-        reflectance = np.ones((H, W, 3), dtype=np.float64) * bg_color
+        reflectance = self._apply_texture(bg_color, H, W)
         depth_map = np.full((H, W), self._p["background_depth"], dtype=np.float64)
 
         # Surface normal z-component (1 = facing camera, <1 = angled away)
@@ -203,8 +280,9 @@ class FlashNoFlashGenerator:
             mask = self._draw_shape(mask, shape)
             idx = mask > 0.5
 
-            # Paint reflectance
-            reflectance[idx] = shape["color"]
+            # Paint textured reflectance
+            shape_tex = self._apply_texture(shape["color"], H, W)
+            reflectance[idx] = shape_tex[idx]
             depth_map[idx] = shape["depth"]
 
             # Give shapes a slight surface normal variation (dome-like)
