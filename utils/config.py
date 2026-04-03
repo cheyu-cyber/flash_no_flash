@@ -77,7 +77,6 @@ class GenerationConfig:
 @dataclass
 class ModelConfig:
     encoder_channels: Tuple[int, ...] = (64, 128, 256, 512)
-    depth_encoder_channels: Tuple[int, ...] = (16, 32, 64, 128)
     bottleneck_channels: int = 512
     attention_heads: int = 4
     decoder_channels: Tuple[int, ...] = (256, 128, 64, 32)
@@ -177,7 +176,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
     model_raw = data.get("model", {})
     model = ModelConfig(
         encoder_channels=tuple(model_raw.get("encoder_channels", [64, 128, 256, 512])),
-        depth_encoder_channels=tuple(model_raw.get("depth_encoder_channels", [16, 32, 64, 128])),
         bottleneck_channels=model_raw.get("bottleneck_channels", 512),
         attention_heads=model_raw.get("attention_heads", 4),
         decoder_channels=tuple(model_raw.get("decoder_channels", [256, 128, 64, 32])),

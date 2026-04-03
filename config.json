@@ -8,7 +8,7 @@
     },
 
     "scene": {
-        "num_shapes_range": [5, 20],
+        "num_shapes_range": [15, 20],
         "shape_types": ["circle", "rectangle", "triangle", "ellipse"],
         "depth_range": [1.0, 7.0],
         "background_depth": [10.0, 20.0],
@@ -60,7 +60,6 @@
 
     "model": {
         "encoder_channels": [64, 128, 256, 512],
-        "depth_encoder_channels": [16, 32, 64, 128],
         "bottleneck_channels": 512,
         "attention_heads": 4,
         "decoder_channels": [256, 128, 64, 32],
