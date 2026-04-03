@@ -85,6 +85,7 @@ class ModelConfig:
     weight_decay: float = 1e-5
     num_epochs: int = 200
     loss_l1_weight: float = 1.0
+    loss_ssim_weight: float = 0.2
     loss_perceptual_weight: float = 0.1
     loss_gate_reg_weight: float = 0.01
     checkpoint_dir: str = "./checkpoints"
@@ -184,6 +185,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
         weight_decay=model_raw.get("weight_decay", 1e-5),
         num_epochs=model_raw.get("num_epochs", 200),
         loss_l1_weight=model_raw.get("loss_l1_weight", 1.0),
+        loss_ssim_weight=model_raw.get("loss_ssim_weight", 0.2),
         loss_perceptual_weight=model_raw.get("loss_perceptual_weight", 0.1),
         loss_gate_reg_weight=model_raw.get("loss_gate_reg_weight", 0.01),
         checkpoint_dir=model_raw.get("checkpoint_dir", "./checkpoints"),

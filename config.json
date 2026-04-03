@@ -68,6 +68,7 @@
         "weight_decay": 1e-5,
         "num_epochs": 200,
         "loss_l1_weight": 1.0,
+        "loss_ssim_weight": 0.2,
         "loss_perceptual_weight": 0.1,
         "loss_gate_reg_weight": 0.01,
         "checkpoint_dir": "./checkpoints",
