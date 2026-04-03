@@ -192,16 +192,17 @@ class FlashNoFlashGenerator:
         the background.
         """
         ttype = self.rng.choice(self._TEXTURE_TYPES)
-
+        
+        # Smooth Perlin-like noise: random field + heavy Gaussian blur
+        raw = self.rng.standard_normal((H, W))
+        sigma = self.rng.uniform(1.5, 50.0)
+        tex = gaussian_filter(raw, sigma=sigma)
+        lo, hi = tex.min(), tex.max()
+        tex = (tex - lo) / (hi - lo + 1e-8)
         if ttype == "noise":
-            # Smooth Perlin-like noise: random field + heavy Gaussian blur
-            raw = self.rng.standard_normal((H, W))
-            sigma = self.rng.uniform(8.0, 40.0)
-            tex = gaussian_filter(raw, sigma=sigma)
-            lo, hi = tex.min(), tex.max()
-            tex = (tex - lo) / (hi - lo + 1e-8)
+            return tex
 
-        elif ttype == "stripes":
+        if ttype == "stripes":
             angle = self.rng.uniform(0, np.pi)
             freq = self.rng.uniform(0.02, 0.12)
             yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
@@ -242,7 +243,7 @@ class FlashNoFlashGenerator:
                      If 0, a random value in [0.08, 0.35] is chosen.
         """
         if strength <= 0.0:
-            strength = float(self.rng.uniform(0.08, 0.35))
+            strength = float(self.rng.uniform(0.02, 0.50))
         tex = self._generate_texture(H, W)
         tex_color = self.rng.uniform(0.05, 0.95, size=3)
         textured = (
