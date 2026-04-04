@@ -184,22 +184,23 @@ class FlashNoFlashGenerator:
 
     _TEXTURE_TYPES = ["noise", "stripes", "checkerboard", "gradient", "speckle"]
 
-    def _generate_texture(self, H: int, W: int) -> np.ndarray:
+    def _generate_texture(self, H: int, W: int, ttype: str | None = None) -> np.ndarray:
         """Generate a single-channel texture pattern in [0, 1], shape (H, W).
 
         A random texture type is chosen each call.  The result is meant to be
         blended with a base colour to give spatial variation to a shape or
         the background.
         """
-        ttype = self.rng.choice(self._TEXTURE_TYPES)
-        
-        # Smooth Perlin-like noise: random field + heavy Gaussian blur
-        raw = self.rng.standard_normal((H, W))
-        sigma = self.rng.uniform(1.5, 50.0)
-        tex = gaussian_filter(raw, sigma=sigma)
-        lo, hi = tex.min(), tex.max()
-        tex = (tex - lo) / (hi - lo + 1e-8)
+        if ttype is None:
+            ttype = self.rng.choice(self._TEXTURE_TYPES)
+
         if ttype == "noise":
+            # Smooth Perlin-like noise: random field + heavy Gaussian blur
+            raw = self.rng.standard_normal((H, W))
+            sigma = self.rng.uniform(1.5, 40.0)
+            tex = gaussian_filter(raw, sigma=sigma)
+            lo, hi = tex.min(), tex.max()
+            tex = (tex - lo) / (hi - lo + 1e-8)
             return tex
 
         if ttype == "stripes":
@@ -243,14 +244,21 @@ class FlashNoFlashGenerator:
                      If 0, a random value in [0.08, 0.35] is chosen.
         """
         if strength <= 0.0:
-            strength = float(self.rng.uniform(0.02, 0.50))
-        tex = self._generate_texture(H, W)
-        tex_color = self.rng.uniform(0.05, 0.95, size=3)
+            strength = float(self.rng.uniform(0.5, 0.8))
+        # Always apply noise as base texture
+        tex = self._generate_texture(H, W, "noise")
+        tex_color = self.rng.uniform(0.8, 1.0, size=3)
         textured = (
             (1 - strength) * base_color[None, None, :]
             + strength * tex[:, :, None] * tex_color[None, None, :]
         )
-        return np.clip(textured, 0.0, 1.0)
+        pattern_tex = self._generate_texture(H, W)
+        pattern_tex_color = self.rng.uniform(0.15, 0.8, size=3)
+        pattern_textured = (
+            (1-strength) * textured
+            + strength * pattern_tex[:, :, None] * pattern_tex_color[None, None, :]
+        )
+        return np.clip(pattern_textured, 0.0, 1.0)
 
     # ------------------------------------------------------------------
     # Scene construction
@@ -269,7 +277,7 @@ class FlashNoFlashGenerator:
 
         # Background with texture
         bg_color = self.rng.uniform(0.05, 0.6, size=3)
-        reflectance = self._apply_texture(bg_color, H, W)
+        reflectance = self._apply_texture(bg_color, H, W, strength = float(self.rng.uniform(0.05, 0.1)))
         depth_map = np.full((H, W), self._p["background_depth"], dtype=np.float64)
 
         # Surface normal z-component (1 = facing camera, <1 = angled away)

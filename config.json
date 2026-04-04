@@ -10,8 +10,8 @@
     "scene": {
         "num_shapes_range": [15, 20],
         "shape_types": ["circle", "rectangle", "triangle", "ellipse"],
-        "depth_range": [1.0, 7.0],
-        "background_depth": [10.0, 20.0],
+        "depth_range": [1.0, 8.0],
+        "background_depth": [20.0, 30.0],
         "max_shape_fraction": 0.4
     },
 
@@ -33,7 +33,7 @@
         "illumination_variation": [0.04, 0.12],
         "color_temperature_shift": [[0.9, 1.1], [0.85, 1.0], [0.75, 0.9]],
 
-        "num_room_lights_range": [0, 3],
+        "num_room_lights_range": [0, 5],
         "room_light_power": [0.5, 0.8],
         "room_light_depth": [-3.0, 0.0],
         "room_light_falloff": [0.5, 1.0],
@@ -66,10 +66,10 @@
         "batch_size": 4,
         "learning_rate": 1e-4,
         "weight_decay": 1e-5,
-        "num_epochs": 200,
+        "num_epochs": 350,
         "loss_l1_weight": 1.0,
-        "loss_ssim_weight": 0.2,
-        "loss_perceptual_weight": 0.1,
+        "loss_ssim_weight": 0.3,
+        "loss_perceptual_weight": 0.2,
         "loss_gate_reg_weight": 0.01,
         "checkpoint_dir": "./checkpoints",
         "log_interval": 10,

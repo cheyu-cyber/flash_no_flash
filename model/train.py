@@ -96,7 +96,7 @@ def train_one_epoch(
     logger: logging.Logger,
 ) -> dict:
     model.train()
-    running = {"l1": 0.0, "perceptual": 0.0, "gate_entropy": 0.0, "total": 0.0}
+    running = {"l1": 0.0, "ssim":0.0, "perceptual": 0.0, "gate_entropy": 0.0, "total": 0.0}
     running_gates: dict[str, float] = {}
     n_batches = 0
 
@@ -125,7 +125,7 @@ def train_one_epoch(
             avg = {k: v / n_batches for k, v in running.items()}
             logger.info(
                 f"  [epoch {epoch+1} | batch {i+1}/{len(loader)}] "
-                f"loss={avg['total']:.4f}  l1={avg['l1']:.4f}  "
+                f"loss={avg['total']:.4f}  l1={avg['l1']:.4f}  ssim={avg['ssim']:.4f}  "
                 f"perc={avg['perceptual']:.4f}  gate={avg['gate_entropy']:.4f}"
             )
 
@@ -142,7 +142,7 @@ def validate(
     device: torch.device,
 ) -> dict:
     model.eval()
-    running = {"l1": 0.0, "perceptual": 0.0, "gate_entropy": 0.0, "total": 0.0, "psnr": 0.0}
+    running = {"l1": 0.0, "ssim": 0.0, "perceptual": 0.0, "gate_entropy": 0.0, "total": 0.0, "psnr": 0.0}
     running_gates: dict[str, float] = {}
     n_batches = 0
 
@@ -188,9 +188,9 @@ def main() -> None:
         log_dir / "metrics.csv",
         fieldnames=[
             "epoch", "lr", "elapsed_s",
-            "train_loss", "train_l1", "train_perceptual", "train_gate_entropy",
+            "train_loss", "train_l1", "train_ssim", "train_perceptual", "train_gate_entropy",
             *[f"train_{c}" for c in gate_cols],
-            "val_loss", "val_l1", "val_perceptual", "val_gate_entropy", "val_psnr",
+            "val_loss", "val_l1", "val_ssim", "val_perceptual", "val_gate_entropy", "val_psnr",
             *[f"val_{c}" for c in gate_cols],
         ],
     )
@@ -265,6 +265,7 @@ def main() -> None:
             "elapsed_s": f"{elapsed:.1f}",
             "train_loss": f"{train_metrics['total']:.6f}",
             "train_l1": f"{train_metrics['l1']:.6f}",
+            "train_ssim": f"{train_metrics['ssim']:.6f}",
             "train_perceptual": f"{train_metrics['perceptual']:.6f}",
             "train_gate_entropy": f"{train_metrics['gate_entropy']:.6f}",
         }
@@ -288,6 +289,7 @@ def main() -> None:
 
             csv_row["val_loss"] = f"{val_metrics['total']:.6f}"
             csv_row["val_l1"] = f"{val_metrics['l1']:.6f}"
+            csv_row["val_ssim"] = f"{val_metrics['ssim']:.6f}"
             csv_row["val_perceptual"] = f"{val_metrics['perceptual']:.6f}"
             csv_row["val_gate_entropy"] = f"{val_metrics['gate_entropy']:.6f}"
             csv_row["val_psnr"] = f"{val_metrics['psnr']:.4f}"
