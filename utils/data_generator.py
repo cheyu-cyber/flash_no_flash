@@ -195,10 +195,35 @@ class FlashNoFlashGenerator:
             ttype = self.rng.choice(self._TEXTURE_TYPES)
 
         if ttype == "noise":
-            # Smooth Perlin-like noise: random field + heavy Gaussian blur
-            raw = self.rng.standard_normal((H, W))
-            sigma = self.rng.uniform(1.5, 40.0)
-            tex = gaussian_filter(raw, sigma=sigma)
+            # # --- Original: Smooth Perlin-like noise ---
+            # raw = self.rng.standard_normal((H, W))
+            # sigma = self.rng.uniform(1.5, 40.0)
+            # tex = gaussian_filter(raw, sigma=sigma)
+            # lo, hi = tex.min(), tex.max()
+            # tex = (tex - lo) / (hi - lo + 1e-8)
+            # return tex
+
+            # --- Sharp texture: mixture of Gaussian blobs + Poisson spikes ---
+            tex = np.zeros((H, W), dtype=np.float64)
+
+            # Gaussian blobs: random bright/dark spots with small sigma
+            n_blobs = self.rng.integers(5, 25)
+            for _ in range(n_blobs):
+                cy, cx = self.rng.integers(0, H), self.rng.integers(0, W)
+                sy = self.rng.uniform(3.0, 20.0)
+                sx = self.rng.uniform(3.0, 20.0)
+                amp = self.rng.uniform(-1.0, 1.0)
+                yy, xx = np.ogrid[0:H, 0:W]
+                blob = amp * np.exp(-((yy - cy)**2 / (2 * sy**2) + (xx - cx)**2 / (2 * sx**2)))
+                tex += blob
+
+            # Poisson point noise: salt-like high-frequency detail
+            lam = self.rng.uniform(0.5, 3.0)
+            poisson_noise = self.rng.poisson(lam, size=(H, W)).astype(np.float64)
+            poisson_noise = gaussian_filter(poisson_noise, sigma=self.rng.uniform(0.5, 2.0))
+            tex += poisson_noise * self.rng.uniform(0.2, 0.6)
+
+            # Normalise to [0, 1]
             lo, hi = tex.min(), tex.max()
             tex = (tex - lo) / (hi - lo + 1e-8)
             return tex
@@ -245,20 +270,23 @@ class FlashNoFlashGenerator:
         """
         if strength <= 0.0:
             strength = float(self.rng.uniform(0.5, 0.8))
-        # Always apply noise as base texture
+
+        # --- Colour-coherent: texture modulates brightness/saturation ---
+        # Layer 1: noise texture as brightness multiplier on the base colour
         tex = self._generate_texture(H, W, "noise")
-        tex_color = self.rng.uniform(0.8, 1.0, size=3)
-        textured = (
-            (1 - strength) * base_color[None, None, :]
-            + strength * tex[:, :, None] * tex_color[None, None, :]
-        )
+        # Map tex from [0,1] to a brightness range centred around 1.0
+        # e.g. strength=0.6 → multiplier in [0.4, 1.6]
+        brightness = 1.0 + strength * (2.0 * tex[:, :, None] - 1.0)
+        textured = base_color[None, None, :] * brightness
+
+        # Layer 2: pattern texture (stripes/checker/etc.) as brightness modulation
+        # Keeps the structural pattern visible but stays in the base colour family
         pattern_tex = self._generate_texture(H, W)
-        pattern_tex_color = self.rng.uniform(0.15, 0.8, size=3)
-        pattern_textured = (
-            (1-strength) * textured
-            + strength * pattern_tex[:, :, None] * pattern_tex_color[None, None, :]
-        )
-        return np.clip(pattern_textured, 0.0, 1.0)
+        pattern_strength = strength * self.rng.uniform(0.3, 0.5)
+        pattern_brightness = 1.0 + pattern_strength * (2.0 * pattern_tex[:, :, None] - 1.0)
+        textured = textured * pattern_brightness
+
+        return np.clip(textured, 0.0, 1.0)
 
     # ------------------------------------------------------------------
     # Scene construction
@@ -277,7 +305,7 @@ class FlashNoFlashGenerator:
 
         # Background with texture
         bg_color = self.rng.uniform(0.05, 0.6, size=3)
-        reflectance = self._apply_texture(bg_color, H, W, strength = float(self.rng.uniform(0.05, 0.1)))
+        reflectance = self._apply_texture(bg_color, H, W, strength = float(self.rng.uniform(0.15, 0.5)))
         depth_map = np.full((H, W), self._p["background_depth"], dtype=np.float64)
 
         # Surface normal z-component (1 = facing camera, <1 = angled away)

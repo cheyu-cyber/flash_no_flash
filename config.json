@@ -1,16 +1,16 @@
 {
-    "image_size": [512, 512],
+    "image_size": [768, 1024],
     "seed": 1869,
 
     "camera": {
         "fov_h": 60.0,
-        "fov_w": 60.0
+        "fov_w": 80.0
     },
 
     "scene": {
-        "num_shapes_range": [15, 20],
+        "num_shapes_range": [15, 25],
         "shape_types": ["circle", "rectangle", "triangle", "ellipse"],
-        "depth_range": [1.0, 8.0],
+        "depth_range": [0.8, 10.0],
         "background_depth": [20.0, 30.0],
         "max_shape_fraction": 0.4
     },
@@ -29,7 +29,7 @@
     },
 
     "ambient": {
-        "base_illumination": [0.3, 0.7],
+        "base_illumination": [0.5, 0.8],
         "illumination_variation": [0.04, 0.12],
         "color_temperature_shift": [[0.9, 1.1], [0.85, 1.0], [0.75, 0.9]],
 
@@ -42,7 +42,7 @@
         "fog_strength": [0.0, 0.15],
         "fog_color": [0.75, 0.75, 0.75],
 
-        "no_flash_darken": [0.3, 0.7]
+        "no_flash_darken": [0.2, 0.5]
     },
 
     "noise": {
@@ -63,7 +63,7 @@
         "bottleneck_channels": 512,
         "attention_heads": 4,
         "decoder_channels": [256, 128, 64, 32],
-        "batch_size": 4,
+        "batch_size": 2,
         "learning_rate": 1e-4,
         "weight_decay": 1e-5,
         "num_epochs": 350,
