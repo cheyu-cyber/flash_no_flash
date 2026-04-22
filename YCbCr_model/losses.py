@@ -1,8 +1,22 @@
-"""Loss functions for the Gated U-Net (RGB variant).
+"""Loss functions for the Gated U-Net (YCbCr variant).
 
-Combined loss = L1 + SSIM + gate entropy regularisation.
+Combined loss = channel-weighted L1 (heavier on Cb/Cr) + SSIM on Y only
++ gate entropy regularisation.
 
-Aligned with the YCbCr variant — no VGG perceptual term.
+Design rationale
+----------------
+Operating in YCbCr lets us weight the losses by what each channel actually
+carries. We exploit that as follows:
+
+* **L1 with channel weights** — Y is weighted 1.0 and Cb/Cr each 2.0, so
+  chroma is pinned tightly to the target (prevents color shift) while the
+  luminance channel stays free to denoise/reconstruct brightness.
+* **SSIM on Y only** — SSIM captures local luminance structure. Applying
+  it only to Y matches its classical formulation and keeps the structural
+  term from double-counting chroma, which L1 already handles.
+* **No VGG perceptual loss** — dropped deliberately. For flash/no-flash
+  denoising the chroma is mostly region-smooth, so the VGG-on-RGB texture
+  prior is not worth the cost or the cross-channel gradient blending.
 """
 
 from __future__ import annotations
@@ -13,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils.config import ModelConfig
+from utils.config import YCbCrModelConfig
 
 
 # ---------------------------------------------------------------------------
@@ -69,16 +83,27 @@ def ssim(
 # ---------------------------------------------------------------------------
 
 class CombinedLoss(nn.Module):
-    """L1 + SSIM + gate entropy regularisation.
+    """Channel-weighted L1 + SSIM-on-Y + gate entropy regularisation.
 
-    Operates on RGB tensors in [0, 1].
+    Operates on YCbCr tensors in [0, 1]. Per-channel L1 weights come from
+    ``cfg.loss_l1_{y,cb,cr}_weight`` — chroma is typically weighted higher
+    so color is pinned tightly while the Y channel stays free.
     """
 
-    def __init__(self, cfg: ModelConfig):
+    def __init__(self, cfg: YCbCrModelConfig):
         super().__init__()
         self.w_l1 = cfg.loss_l1_weight
         self.w_ssim = cfg.loss_ssim_weight
         self.w_gate = cfg.loss_gate_reg_weight
+        # Register channel weights as a buffer so they move with .to(device).
+        self.register_buffer(
+            "l1_chan_w",
+            torch.tensor([
+                cfg.loss_l1_y_weight,
+                cfg.loss_l1_cb_weight,
+                cfg.loss_l1_cr_weight,
+            ]).reshape(1, 3, 1, 1),
+        )
 
     def forward(
         self,
@@ -89,18 +114,21 @@ class CombinedLoss(nn.Module):
         """
         Parameters
         ----------
-        output : (B, 3, H, W) RGB
-        target : (B, 3, H, W) RGB
+        output : (B, 3, H, W) YCbCr
+        target : (B, 3, H, W) YCbCr
         gates  : list of (B, C_k, H_k, W_k) gate activations
         """
-        # --- L1 ---
-        l1 = F.l1_loss(output, target)
+        # --- Channel-weighted L1 ---
+        # Weighted mean of |output - target| with per-channel weights.
+        abs_diff = (output - target).abs()
+        weighted = abs_diff * self.l1_chan_w
+        l1 = weighted.sum() / (abs_diff.numel() * self.l1_chan_w.mean())
 
-        # --- SSIM (1 - SSIM so lower = better) ---
-        ssim_val = ssim(output, target)
+        # --- SSIM on Y channel only ---
+        ssim_val = ssim(output[:, 0:1], target[:, 0:1])
         ssim_loss = 1.0 - ssim_val
 
-        # --- Gate entropy (push gates toward 0 or 1) ---
+        # --- Gate entropy (push gates toward 0 or 1 — decisive) ---
         eps = 1e-7
         gate_entropy = torch.tensor(0.0, device=output.device)
         for g in gates:

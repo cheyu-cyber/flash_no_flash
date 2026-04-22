@@ -1,8 +1,12 @@
 """Run inference on validation samples and real photos, save visual comparisons.
 
+The YCbCr model operates on YCbCr tensors internally; all inputs and outputs
+are converted to/from RGB at the boundary so the visualisations remain in
+RGB for human viewing.
+
 Run from the project root:
 
-    python -m model.visualize
+    python -m YCbCr_model.visualize
 """
 
 from __future__ import annotations
@@ -18,8 +22,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from utils.config import load_config
-from model.network import GatedUNet
-from model.dataset import FlashNoFlashDataset
+from YCbCr_model.network import GatedUNet
+from YCbCr_model.dataset import FlashNoFlashDataset
+from YCbCr_model.color import rgb_to_ycbcr, ycbcr_to_rgb
 
 
 REAL_DATA_DIR = Path("data/flash_data_JBF_Detail_transfer")
@@ -42,6 +47,12 @@ REAL_SCENES = [
 def tensor_to_numpy(t: torch.Tensor) -> np.ndarray:
     """(C, H, W) tensor [0,1] -> (H, W, C) numpy for display."""
     return t.clamp(0, 1).permute(1, 2, 0).cpu().numpy()
+
+
+def ycbcr_tensor_to_rgb_numpy(t: torch.Tensor) -> np.ndarray:
+    """YCbCr (C, H, W) tensor [0,1] -> RGB (H, W, C) numpy for display."""
+    rgb = ycbcr_to_rgb(t.unsqueeze(0)).squeeze(0)
+    return rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy()
 
 
 def load_tif_rgb(path: Path) -> np.ndarray:
@@ -129,20 +140,20 @@ def save_comparison(
 @torch.no_grad()
 def main() -> None:
     cfg = load_config()
-    mcfg = cfg.model
+    mcfg = cfg.ycbcr_model
     input_size = tuple(cfg.image_size)  # (H, W) that the model was trained on
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load model
     model = GatedUNet(mcfg).to(device)
-    ckpt_path = Path(mcfg.checkpoint_dir) / "latest.pt"
+    ckpt_path = Path(mcfg.checkpoint_dir) / "best.pt"
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "
           f"(val_loss={ckpt.get('val_loss', '?')})")
 
-    out_dir = Path("logs/visualizations")
+    out_dir = Path("logs_ycbcr/visualizations")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ----------------------------------------------------------------
@@ -159,8 +170,9 @@ def main() -> None:
         no_flash = batch["no_flash"].unsqueeze(0).to(device)
 
         output, gates = model(flash, no_flash)
-        output_np = tensor_to_numpy(output.squeeze(0))
-        target_np = tensor_to_numpy(batch["target"])
+        # Convert YCbCr → RGB for display and metrics
+        output_np = ycbcr_tensor_to_rgb_numpy(output.squeeze(0))
+        target_np = ycbcr_tensor_to_rgb_numpy(batch["target"])
 
         mse = np.mean((output_np - target_np) ** 2)
         psnr_val = 10 * math.log10(1.0 / max(mse, 1e-10))
@@ -168,8 +180,8 @@ def main() -> None:
         save_comparison(
             out_dir / f"synthetic_{i:03d}.png",
             f"Synthetic Sample {i}",
-            tensor_to_numpy(batch["flash"]),
-            tensor_to_numpy(batch["no_flash"]),
+            ycbcr_tensor_to_rgb_numpy(batch["flash"]),
+            ycbcr_tensor_to_rgb_numpy(batch["no_flash"]),
             output_np,
             gates,
             target_np=target_np,
@@ -193,12 +205,13 @@ def main() -> None:
         flash_full = load_tif_rgb(flash_path)
         noflash_full = load_tif_rgb(noflash_path)
 
-        # Resize to model input
-        flash_t = prepare_input(flash_full, input_size).unsqueeze(0).to(device)
-        noflash_t = prepare_input(noflash_full, input_size).unsqueeze(0).to(device)
+        # Resize to model input and convert RGB → YCbCr before feeding the model
+        flash_t = rgb_to_ycbcr(prepare_input(flash_full, input_size).unsqueeze(0)).to(device)
+        noflash_t = rgb_to_ycbcr(prepare_input(noflash_full, input_size).unsqueeze(0)).to(device)
 
         output, gates = model(flash_t, noflash_t)
-        output_np = tensor_to_numpy(output.squeeze(0))
+        # Model output is YCbCr — convert back to RGB for display
+        output_np = ycbcr_tensor_to_rgb_numpy(output.squeeze(0))
 
         in_h, in_w = input_size
 

@@ -43,6 +43,12 @@ class FlashConfig:
 class AmbientConfig:
     base_illumination: Tuple[float, float] = (0.10, 0.28)
     illumination_variation: Tuple[float, float] = (0.04, 0.12)
+    # True ambient colour of the scene in Kelvin (~2700 warm tungsten,
+    # ~5500 daylight, ~6500 cool). One sample tints the base fill (clean
+    # target); each room light independently draws its own Kelvin from
+    # the same range.
+    color_temperature: Tuple[float, float] = (2700.0, 6500.0)
+    # White-balance error layered on top, applied only to the no-flash input.
     color_temperature_shift: Tuple[Tuple[float, float], ...] = (
         (0.9, 1.1), (0.85, 1.0), (0.75, 0.9)
     )
@@ -89,6 +95,38 @@ class ModelConfig:
     loss_perceptual_weight: float = 0.1
     loss_gate_reg_weight: float = 0.01
     checkpoint_dir: str = "./checkpoints"
+    resume_checkpoint: str = ""
+    log_interval: int = 10
+    val_interval: int = 5
+    num_workers: int = 4
+
+
+@dataclass
+class YCbCrModelConfig:
+    """Config for the YCbCr variant of the Gated U-Net.
+
+    Same architecture as ``ModelConfig`` but swaps the VGG perceptual weight
+    for per-channel L1 weights (Y / Cb / Cr), since the YCbCr loss pins
+    chroma at the pixel level instead of relying on a pretrained RGB net.
+    """
+    encoder_channels: Tuple[int, ...] = (64, 128, 256, 512)
+    bottleneck_channels: int = 512
+    attention_heads: int = 4
+    decoder_channels: Tuple[int, ...] = (256, 128, 64, 32)
+    batch_size: int = 4
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-5
+    num_epochs: int = 200
+    loss_l1_weight: float = 1.0
+    loss_ssim_weight: float = 0.2
+    loss_gate_reg_weight: float = 0.01
+    # Per-channel L1 weights (Y, Cb, Cr). Chroma weighted higher so that
+    # color is pinned tightly while luminance stays free to reconstruct.
+    loss_l1_y_weight: float = 1.0
+    loss_l1_cb_weight: float = 2.0
+    loss_l1_cr_weight: float = 2.0
+    checkpoint_dir: str = "./checkpoints_ycbcr"
+    resume_checkpoint: str = ""
     log_interval: int = 10
     val_interval: int = 5
     num_workers: int = 4
@@ -105,6 +143,7 @@ class SyntheticDataConfig:
     noise: NoiseConfig = field(default_factory=NoiseConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
+    ycbcr_model: YCbCrModelConfig = field(default_factory=YCbCrModelConfig)
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
@@ -150,6 +189,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
     ambient = AmbientConfig(
         base_illumination=tuple(ambient_raw.get("base_illumination", [0.10, 0.28])),
         illumination_variation=tuple(ambient_raw.get("illumination_variation", [0.04, 0.12])),
+        color_temperature=tuple(ambient_raw.get("color_temperature", [2700.0, 6500.0])),
         color_temperature_shift=tuple(tuple(ch) for ch in ct_raw),
         num_room_lights_range=tuple(ambient_raw.get("num_room_lights_range", [1, 3])),
         room_light_power=tuple(ambient_raw.get("room_light_power", [0.3, 1.0])),
@@ -189,9 +229,33 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
         loss_perceptual_weight=model_raw.get("loss_perceptual_weight", 0.1),
         loss_gate_reg_weight=model_raw.get("loss_gate_reg_weight", 0.01),
         checkpoint_dir=model_raw.get("checkpoint_dir", "./checkpoints"),
+        resume_checkpoint=model_raw.get("resume_checkpoint", ""),
         log_interval=model_raw.get("log_interval", 10),
         val_interval=model_raw.get("val_interval", 5),
         num_workers=model_raw.get("num_workers", 4),
+    )
+
+    ycbcr_raw = data.get("ycbcr_model", {})
+    ycbcr_model = YCbCrModelConfig(
+        encoder_channels=tuple(ycbcr_raw.get("encoder_channels", [64, 128, 256, 512])),
+        bottleneck_channels=ycbcr_raw.get("bottleneck_channels", 512),
+        attention_heads=ycbcr_raw.get("attention_heads", 4),
+        decoder_channels=tuple(ycbcr_raw.get("decoder_channels", [256, 128, 64, 32])),
+        batch_size=ycbcr_raw.get("batch_size", 4),
+        learning_rate=ycbcr_raw.get("learning_rate", 1e-4),
+        weight_decay=ycbcr_raw.get("weight_decay", 1e-5),
+        num_epochs=ycbcr_raw.get("num_epochs", 200),
+        loss_l1_weight=ycbcr_raw.get("loss_l1_weight", 1.0),
+        loss_ssim_weight=ycbcr_raw.get("loss_ssim_weight", 0.2),
+        loss_gate_reg_weight=ycbcr_raw.get("loss_gate_reg_weight", 0.01),
+        loss_l1_y_weight=ycbcr_raw.get("loss_l1_y_weight", 1.0),
+        loss_l1_cb_weight=ycbcr_raw.get("loss_l1_cb_weight", 2.0),
+        loss_l1_cr_weight=ycbcr_raw.get("loss_l1_cr_weight", 2.0),
+        checkpoint_dir=ycbcr_raw.get("checkpoint_dir", "./checkpoints_ycbcr"),
+        resume_checkpoint=ycbcr_raw.get("resume_checkpoint", ""),
+        log_interval=ycbcr_raw.get("log_interval", 10),
+        val_interval=ycbcr_raw.get("val_interval", 5),
+        num_workers=ycbcr_raw.get("num_workers", 4),
     )
 
     return SyntheticDataConfig(
@@ -204,4 +268,5 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
         noise=noise,
         generation=generation,
         model=model,
+        ycbcr_model=ycbcr_model,
     )

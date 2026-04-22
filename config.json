@@ -25,13 +25,14 @@
         "specular_shininess": [10.0, 40.0],
         "shadow_softness": [1.5, 5.0],
         "ambient_in_flash": [0.02, 0.1],
-        "flash_color_temp": [5000, 6000]
+        "flash_color_temp": [6500, 8000]
     },
 
     "ambient": {
-        "base_illumination": [0.5, 0.8],
+        "base_illumination": [0.3, 0.6],
         "illumination_variation": [0.04, 0.12],
-        "color_temperature_shift": [[0.9, 1.1], [0.85, 1.0], [0.75, 0.9]],
+        "color_temperature": [2700, 6500],
+        "color_temperature_shift": [[0.9, 1.1], [0.9, 1.1], [0.9, 1.1]],
 
         "num_room_lights_range": [0, 5],
         "room_light_power": [0.5, 0.8],
@@ -53,8 +54,8 @@
     },
 
     "generation": {
-        "num_train": 1000,
-        "num_val": 200,
+        "num_train": 2000,
+        "num_val": 500,
         "output_dir": "./data/synthetic"
     },
 
@@ -69,11 +70,34 @@
         "num_epochs": 350,
         "loss_l1_weight": 1.0,
         "loss_ssim_weight": 0.3,
-        "loss_perceptual_weight": 0.2,
-        "loss_gate_reg_weight": 0.01,
+        "loss_perceptual_weight": 0.5,
+        "loss_gate_reg_weight": 0.0,
         "checkpoint_dir": "./checkpoints",
         "log_interval": 10,
         "val_interval": 5,
-        "num_workers": 4
+        "num_workers": 4,
+        "resume_checkpoint": "./checkpoints/latest.pt"
+    },
+
+    "ycbcr_model": {
+        "encoder_channels": [64, 128, 256, 512],
+        "bottleneck_channels": 512,
+        "attention_heads": 4,
+        "decoder_channels": [256, 128, 64, 32],
+        "batch_size": 2,
+        "learning_rate": 1e-4,
+        "weight_decay": 1e-5,
+        "num_epochs": 350,
+        "loss_l1_weight": 1.0,
+        "loss_ssim_weight": 0.3,
+        "loss_gate_reg_weight": 0.0,
+        "loss_l1_y_weight": 1.0,
+        "loss_l1_cb_weight": 2.0,
+        "loss_l1_cr_weight": 2.0,
+        "checkpoint_dir": "./checkpoints_ycbcr",
+        "log_interval": 10,
+        "val_interval": 5,
+        "num_workers": 4,
+        "resume_checkpoint": "./checkpoints_ycbcr/latest.pt"
     }
 }

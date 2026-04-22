@@ -104,6 +104,7 @@ class FlashNoFlashGenerator:
             "flash_color_tint": kelvin_to_rgb_tint(r(*fcfg.flash_color_temp)),
             "base_illumination": r(*acfg.base_illumination),
             "illumination_variation": r(*acfg.illumination_variation),
+            "base_color_tint": kelvin_to_rgb_tint(r(*acfg.color_temperature)),
             "color_temperature_shift": np.array([r(*ch) for ch in acfg.color_temperature_shift]),
             "fog_strength": r(*acfg.fog_strength),
             "no_flash_darken": r(*acfg.no_flash_darken),
@@ -304,7 +305,7 @@ class FlashNoFlashGenerator:
         H, W = self.H, self.W
 
         # Background with texture
-        bg_color = self.rng.uniform(0.05, 0.6, size=3)
+        bg_color = self.rng.uniform(0.05, 0.75, size=3)
         reflectance = self._apply_texture(bg_color, H, W, strength = float(self.rng.uniform(0.15, 0.5)))
         depth_map = np.full((H, W), self._p["background_depth"], dtype=np.float64)
 
@@ -452,8 +453,10 @@ class FlashNoFlashGenerator:
         variation = gaussian_filter(variation, sigma=40.0)
         fill = np.clip(base + variation, 0.02, 0.4)
 
-        # Expand to 3 channels (neutral — no colour cast on clean target)
-        ambient_light = fill[:, :, None] * np.ones(3)[None, None, :]
+        # Expand to 3 channels and tint by the scene's true ambient colour
+        # temperature (Kelvin). This cast is part of the clean target — the
+        # model should reconstruct it, not undo it.
+        ambient_light = fill[:, :, None] * self._p["base_color_tint"][None, None, :]
 
         # ----------------------------------------------------------
         # Layer 2: Random room lights (depth-dependent)
@@ -477,9 +480,11 @@ class FlashNoFlashGenerator:
             power = self.rng.uniform(*acfg.room_light_power)
             falloff_exp = self.rng.uniform(*acfg.room_light_falloff)
 
-            # Random warm/cool color for this light (slight tint)
-            light_color = self.rng.uniform(0.8, 1.2, size=3)
-            light_color /= light_color.max()  # normalise so max channel = 1
+            # Per-light colour temperature (Kelvin). Each lamp picks its own
+            # Kelvin within the configured range, so a scene can mix warm
+            # tungsten and cool daylight sources realistically.
+            light_kelvin = self.rng.uniform(*acfg.color_temperature)
+            light_color = kelvin_to_rgb_tint(light_kelvin)
 
             # 3D distance from every pixel to this light.
             # Convert pixel offsets to the same scale as depth using

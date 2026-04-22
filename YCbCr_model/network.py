@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils.config import ModelConfig
+from utils.config import YCbCrModelConfig
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +157,11 @@ class GatedUNet(nn.Module):
 
     Parameters
     ----------
-    cfg : ModelConfig
+    cfg : YCbCrModelConfig
         Architecture hyper-parameters loaded from config.json.
     """
 
-    def __init__(self, cfg: ModelConfig):
+    def __init__(self, cfg: YCbCrModelConfig):
         super().__init__()
         enc_ch = cfg.encoder_channels           # (64, 128, 256, 512)
         dec_ch = cfg.decoder_channels           # (256, 128, 64, 32)

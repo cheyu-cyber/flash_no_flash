@@ -1,8 +1,12 @@
-"""Training script for the Gated U-Net.
+"""Training script for the Gated U-Net (YCbCr variant).
+
+The network operates on YCbCr tensors end-to-end. PSNR is reported on
+the RGB reconstruction (for direct comparison with the RGB model) and
+on the Y channel alone (standard luminance PSNR).
 
 Run from the project root:
 
-    python -m model.train
+    python -m YCbCr_model.train
 """
 
 from __future__ import annotations
@@ -19,9 +23,10 @@ import torch
 from torch.utils.data import DataLoader
 
 from utils.config import load_config
-from model.network import GatedUNet
-from model.dataset import FlashNoFlashDataset
-from model.losses import CombinedLoss
+from YCbCr_model.network import GatedUNet
+from YCbCr_model.dataset import FlashNoFlashDataset
+from YCbCr_model.losses import CombinedLoss
+from YCbCr_model.color import ycbcr_to_rgb
 
 
 def setup_logging(log_dir: Path) -> logging.Logger:
@@ -73,6 +78,16 @@ def psnr(output: torch.Tensor, target: torch.Tensor) -> float:
     if mse < 1e-10:
         return 100.0
     return 10.0 * math.log10(1.0 / mse)
+
+
+def psnr_rgb(output_ycbcr: torch.Tensor, target_ycbcr: torch.Tensor) -> float:
+    """PSNR on the RGB reconstruction (comparable to RGB-trained models)."""
+    return psnr(ycbcr_to_rgb(output_ycbcr), ycbcr_to_rgb(target_ycbcr))
+
+
+def psnr_y(output_ycbcr: torch.Tensor, target_ycbcr: torch.Tensor) -> float:
+    """PSNR on the Y (luminance) channel only."""
+    return psnr(output_ycbcr[:, 0:1], target_ycbcr[:, 0:1])
 
 
 def gate_stats(gates: List[torch.Tensor]) -> dict:
@@ -193,7 +208,10 @@ def validate(
     device: torch.device,
 ) -> dict:
     model.eval()
-    running = {"l1": 0.0, "ssim": 0.0, "gate_entropy": 0.0, "total": 0.0, "psnr": 0.0}
+    running = {
+        "l1": 0.0, "ssim": 0.0, "gate_entropy": 0.0, "total": 0.0,
+        "psnr": 0.0, "psnr_y": 0.0,
+    }
     running_gates: dict[str, float] = {}
     n_batches = 0
 
@@ -207,7 +225,8 @@ def validate(
 
         for k in loss_dict:
             running[k] += loss_dict[k]
-        running["psnr"] += psnr(output, target)
+        running["psnr"] += psnr_rgb(output, target)
+        running["psnr_y"] += psnr_y(output, target)
 
         gs = gate_stats(gates)
         for k, v in gs.items():
@@ -222,11 +241,12 @@ def validate(
 
 def main() -> None:
     cfg = load_config()
-    mcfg = cfg.model
+    mcfg = cfg.ycbcr_model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ---------- logging ----------
-    log_dir = Path("logs")
+    # Separate log dir from the RGB model so metrics.csv doesn't clash.
+    log_dir = Path("logs_ycbcr")
     logger = setup_logging(log_dir)
 
     # Determine gate column names from encoder config
@@ -241,7 +261,8 @@ def main() -> None:
             "epoch", "lr", "elapsed_s",
             "train_loss", "train_l1", "train_ssim", "train_gate_entropy",
             *[f"train_{c}" for c in gate_cols],
-            "val_loss", "val_l1", "val_ssim", "val_gate_entropy", "val_psnr",
+            "val_loss", "val_l1", "val_ssim", "val_gate_entropy",
+            "val_psnr", "val_psnr_y",
             *[f"val_{c}" for c in gate_cols],
         ],
     )
@@ -349,7 +370,8 @@ def main() -> None:
             )
             logger.info(
                 f"  val_loss={val_metrics['total']:.4f}  "
-                f"val_psnr={val_metrics['psnr']:.2f} dB"
+                f"val_psnr(RGB)={val_metrics['psnr']:.2f} dB  "
+                f"val_psnr(Y)={val_metrics['psnr_y']:.2f} dB"
             )
             logger.info(f"  Val gate contributions: {val_gate_summary}")
 
@@ -358,6 +380,7 @@ def main() -> None:
             csv_row["val_ssim"] = f"{val_metrics['ssim']:.6f}"
             csv_row["val_gate_entropy"] = f"{val_metrics['gate_entropy']:.6f}"
             csv_row["val_psnr"] = f"{val_metrics['psnr']:.4f}"
+            csv_row["val_psnr_y"] = f"{val_metrics['psnr_y']:.4f}"
             for c in gate_cols:
                 csv_row[f"val_{c}"] = f"{val_metrics.get(c, 0):.6f}"
 
