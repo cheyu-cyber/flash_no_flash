@@ -104,14 +104,31 @@ def save_combined(path: Path, flash: np.ndarray, noflash: np.ndarray, output: np
 
 
 def discover_pairs() -> list[tuple[str, Path, Path]]:
-    """Match flash/<name> with no_flash/<name> (same filename in both dirs)."""
+    """Match every flash file with its no-flash counterpart.
+
+    The dataset mixes three filename conventions:
+
+    * ``<name>_00_flash.<ext>`` <-> ``<name>_01_noflash.<ext>`` (TIF scenes)
+    * ``<name>_flash.<ext>``    <-> ``<name>_noflash.<ext>``    (JPG photos)
+    * ``<name>.<ext>``          <-> ``<name>.<ext>``            (numeric PNGs)
+    """
     pairs = []
     for fp in sorted(FLASH_DIR.iterdir()):
         if not fp.is_file():
             continue
-        np_path = NOFLASH_DIR / fp.name
+        stem, ext = fp.stem, fp.suffix
+        if "_00_flash" in stem:
+            base = stem.replace("_00_flash", "")
+            np_name = f"{base}_01_noflash{ext}"
+        elif stem.endswith("_flash"):
+            base = stem[: -len("_flash")]
+            np_name = f"{base}_noflash{ext}"
+        else:
+            base = stem
+            np_name = fp.name  # numeric / identical-name convention
+        np_path = NOFLASH_DIR / np_name
         if np_path.exists():
-            pairs.append((fp.stem, fp, np_path))
+            pairs.append((base, fp, np_path))
     return pairs
 
 
