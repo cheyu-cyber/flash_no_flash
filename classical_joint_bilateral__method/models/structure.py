@@ -1,31 +1,12 @@
-"""Denoising pipeline structure that follows Figure 3 from the paper.
-
-This file mirrors the denoising-side overview in Figure 3 of:
-Petschnigg et al., "Digital Photography with Flash and No-Flash Image Pairs".
-
-The flow is:
-    A (ambient / no-flash) -> bilateral filter -> A_base
-    A + F (flash) -> joint bilateral filter -> A_NR
-    linearized A and F -> shadow/specularity detection -> M
-    final merge -> A_NR_prime = (1 - M) * A_NR + M * A_base
-
-The implementation below is lightweight and intended as a clear structural match
-for the paper, not as a production-optimized image processing library.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
+import cv2
 import numpy as np
-
-try:
-    from .algo import bilateral_filter, joint_bilateral_filter
-except ImportError:
-    from models.algo import bilateral_filter, joint_bilateral_filter
-
 Array = np.ndarray
+from models.algo import bilateral_filter, joint_bilateral_filter
 
 
 @dataclass
@@ -35,32 +16,13 @@ class DenoisingResult:
     shadow_mask: Array
     specularity_mask: Array
     artifact_mask: Array
-    denoised: Array
+    result: Array
 
-
-
-def _ensure_float_image(image: Array) -> Array:
-    image = np.asarray(image, dtype=np.float64)
-    if image.ndim not in (2, 3):
-        raise ValueError("image must be HxW or HxWxC")
-    return image
-
-
-
+#---RGB to luminance and mask cleanup helpers (Section 4.3 prose)-------
 def _to_channel_last(image: Array) -> tuple[Array, bool]:
-    image = _ensure_float_image(image)
     if image.ndim == 2:
         return image[..., None], True
     return image, False
-
-
-
-def _from_channel_last(image: Array, squeeze_gray: bool) -> Array:
-    if squeeze_gray:
-        return image[..., 0]
-    return image
-
-
 
 def _rgb_luminance(image: Array) -> Array:
     image_cl, squeeze_gray = _to_channel_last(image)
@@ -73,132 +35,50 @@ def _rgb_luminance(image: Array) -> Array:
     b = image_cl[..., 2]
     return 0.299 * r + 0.587 * g + 0.114 * b
 
-
-
-def _max_filter(mask: Array, radius: int) -> Array:
+#-----Mask cleanup helpers (Section 4.3 prose)-------
+def _clean_binary_mask(mask: Array, radius: int = 1) -> Array:
+    """Open -> close -> conservative dilate, per Section 4.3 prose."""
     if radius <= 0:
-        return mask.copy()
-    mask = np.asarray(mask, dtype=np.float64)
-    h, w = mask.shape
-    padded = np.pad(mask, ((radius, radius), (radius, radius)), mode="edge")
-    out = np.zeros_like(mask)
-    for y in range(h):
-        for x in range(w):
-            patch = padded[y : y + 2 * radius + 1, x : x + 2 * radius + 1]
-            out[y, x] = np.max(patch)
-    return out
+        return np.clip(mask.astype(np.float64), 0.0, 1.0)
+    binary = (mask > 0.5).astype(np.uint8)
+    kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
 
+    binary = cv2.erode(binary, kernel)    # open  ...
+    binary = cv2.dilate(binary, kernel)   #   ... removes speckles
+    binary = cv2.dilate(binary, kernel)   # close ...
+    binary = cv2.erode(binary, kernel)    #   ... fills pinholes
+    binary = cv2.dilate(binary, kernel)   # conservative coverage
 
-
-def _min_filter(mask: Array, radius: int) -> Array:
-    if radius <= 0:
-        return mask.copy()
-    mask = np.asarray(mask, dtype=np.float64)
-    h, w = mask.shape
-    padded = np.pad(mask, ((radius, radius), (radius, radius)), mode="edge")
-    out = np.zeros_like(mask)
-    for y in range(h):
-        for x in range(w):
-            patch = padded[y : y + 2 * radius + 1, x : x + 2 * radius + 1]
-            out[y, x] = np.min(patch)
-    return out
-
-
-
-def _binary_open_close(mask: Array, radius: int = 1) -> Array:
-    mask = (mask > 0.5).astype(np.float64)
-    eroded = _min_filter(mask, radius)
-    opened = _max_filter(eroded, radius)
-    dilated = _max_filter(opened, radius)
-    closed = _min_filter(dilated, radius)
-    return (closed > 0.5).astype(np.float64)
-
-
+    return binary.astype(np.float64)
 
 def _feather_mask(mask: Array, radius: int = 2) -> Array:
-    mask = np.asarray(mask, dtype=np.float64)
+    """Gaussian blur to feather the mask edges (Section 4.3 final-merge prose)."""
     if radius <= 0:
         return np.clip(mask, 0.0, 1.0)
-    size = 2 * radius + 1
-    padded = np.pad(mask, ((radius, radius), (radius, radius)), mode="edge")
-    out = np.zeros_like(mask)
-    for y in range(mask.shape[0]):
-        for x in range(mask.shape[1]):
-            patch = padded[y : y + size, x : x + size]
-            out[y, x] = np.mean(patch)
-    return np.clip(out, 0.0, 1.0)
-
-
-
-def linearize_ambient_to_flash_space(
-    ambient_linear_prime: Array,
-    iso_ambient: float,
-    t_ambient: float,
-    iso_flash: float,
-    t_flash: float,
-) -> Array:
-    """Exposure-normalize A' into the same linear space as F.
-
-    Equation mapping
-    ----------------
-    Implements Eq. (1):
-        A_lin = A'_lin * (ISO_F * Delta t_F) / (ISO_A * Delta t_A)
-    """
-    ambient_linear_prime = _ensure_float_image(ambient_linear_prime)
-    scale = (iso_flash * t_flash) / (iso_ambient * t_ambient)
-    return ambient_linear_prime * scale
-
-
+    sigma = radius / 1.5
+    blurred = cv2.GaussianBlur(mask, ksize=(0, 0), sigmaX=sigma)
+    return np.clip(blurred, 0.0, 1.0)
 
 def detect_shadow_mask(
     ambient_linear: Array,
     flash_linear: Array,
     tau_shadow: float,
-    morph_radius: int = 1,
-    feather_radius: int = 2,
 ) -> Array:
-    """Detect flash shadows using the paper's threshold rule.
-
-    Equation mapping
-    ----------------
-    Implements Eq. (8):
-        M_shad = 1 when |F_lin - A_lin| <= tau_shad, else 0
-
-    We apply the test to luminance, then do simple morphology and feathering to
-    mimic the paper's cleanup description.
-    """
+    """Detect flash shadows"""
     a_l = _rgb_luminance(ambient_linear)
     f_l = _rgb_luminance(flash_linear)
-    shadow = (np.abs(f_l - a_l) <= tau_shadow).astype(np.float64)
-    shadow = _binary_open_close(shadow, radius=morph_radius)
-    shadow = _max_filter(shadow, morph_radius)  # conservative dilation
-    shadow = _feather_mask(shadow, feather_radius)
-    return shadow
-
-
+    return (np.abs(f_l - a_l) <= tau_shadow).astype(np.float64)
 
 def detect_specularity_mask(
     flash_linear: Array,
     saturation_threshold: float = 0.95,
-    morph_radius: int = 1,
-    feather_radius: int = 2,
 ) -> Array:
-    """Detect flash specularities with the paper's heuristic.
-
-    Formula / heuristic mapping
-    ---------------------------
-    Section 4.3 states that specular regions are detected where flash luminance is
-    greater than 95% of the sensor range. This is not given an equation number, but
-    it is one of the key rules in the denoising overview.
+    """
+    Section 4.3: specular regions are detected where flash luminance is greater
+    than 95% of the sensor range. No equation number is given in the paper.
     """
     flash_l = _rgb_luminance(flash_linear)
-    spec = (flash_l >= saturation_threshold).astype(np.float64)
-    spec = _binary_open_close(spec, radius=morph_radius)
-    spec = _max_filter(spec, morph_radius)
-    spec = _feather_mask(spec, feather_radius)
-    return spec
-
-
+    return (flash_l >= saturation_threshold).astype(np.float64)
 
 def detect_flash_artifact_mask(
     ambient_linear: Array,
@@ -208,24 +88,72 @@ def detect_flash_artifact_mask(
     morph_radius: int = 1,
     feather_radius: int = 2,
 ) -> tuple[Array, Array, Array]:
-    """Return shadow mask, specularity mask, and their union M."""
-    shadow = detect_shadow_mask(
-        ambient_linear,
-        flash_linear,
-        tau_shadow=tau_shadow,
-        morph_radius=morph_radius,
-        feather_radius=feather_radius,
-    )
-    spec = detect_specularity_mask(
-        flash_linear,
-        saturation_threshold=saturation_threshold,
-        morph_radius=morph_radius,
-        feather_radius=feather_radius,
-    )
+    """Return shadow mask, specularity mask, and their union M.
+
+    Section 4.3 describes the cleanup applied here:
+
+    - Per individual mask: morphological (erode then dilate) to remove
+      speckles and fill holes, then a final dilate for a conservative estimate.
+    - On the union: blur to feather the edges so that the final blend is seamless.
+
+    Eq. (8) and the 95% heuristic produce the raw masks; everything else here
+    comes from the prose in Section 4.3.
+    """
+    shadow_raw = detect_shadow_mask(ambient_linear, flash_linear, tau_shadow)
+    spec_raw = detect_specularity_mask(flash_linear, saturation_threshold)
+
+    # Per-mask cleanup: open -> close -> conservative dilate.
+    shadow = _clean_binary_mask(shadow_raw, radius=morph_radius)
+    spec = _clean_binary_mask(spec_raw, radius=morph_radius)
+
+    # Union, then blur for feathering (Section 4.3 final-merge prose).
     merged = np.clip(np.maximum(shadow, spec), 0.0, 1.0)
     merged = _feather_mask(merged, feather_radius)
     return shadow, spec, merged
 
+
+#-----Provide sRGB linearization------
+def srgb_to_linear(image: Array) -> Array:
+    """Convert sRGB to linear RGB."""
+    image = np.asarray(image, dtype=np.float64)
+    image = np.clip(image, 0.0, 1.0)
+    low = image / 12.92
+    high = ((image + 0.055) / 1.055) ** 2.4
+    return np.where(image <= 0.04045, low, high)
+
+def linearize_ambient_to_flash_space(
+    ambient_linear_prime: Array,
+    iso_ambient: float,
+    t_ambient: float,
+    iso_flash: float,
+    t_flash: float,
+) -> Array:
+    """
+    Implements Eq. (1):
+        A_lin = A'_lin * (ISO_F * Delta t_F) / (ISO_A * Delta t_A)
+    """
+    scale = (iso_flash * t_flash) / (iso_ambient * t_ambient)
+    return ambient_linear_prime * scale
+
+#-----Main pipeline steps (Section 4.2 equations)-------
+
+def compute_detail_layer(
+    flash: Array,
+    sigma_d: float,
+    sigma_r: float,
+    epsilon: float = 0.02,
+    radius: Optional[int] = None,
+) -> Array:
+    """Compute the flash detail layer.
+    Equation mapping
+    ----------------
+    Implements Eq. (6):
+        F_detail = (F + eps) / (F_base + eps)
+    """
+    flash_base = bilateral_filter(
+        flash, sigma_d=sigma_d, sigma_r=sigma_r, radius=radius
+    )
+    return (flash + epsilon) / (flash_base + epsilon)
 
 
 def merge_denoised_with_mask(
@@ -233,17 +161,35 @@ def merge_denoised_with_mask(
     ambient_base: Array,
     mask: Array,
 ) -> Array:
-    """Final denoising merge from the paper.
-
-    Equation mapping
-    ----------------
-    Implements Eq. (5):
-        A'_NR = (1 - M) A_NR + M A_base
     """
-    ambient_joint = _ensure_float_image(ambient_joint)
-    ambient_base = _ensure_float_image(ambient_base)
+    Implements Eq. (7):
+        A_final = (1 - M) * A_NR + M * A_base
+    """
     if ambient_joint.shape != ambient_base.shape:
         raise ValueError("ambient_joint and ambient_base must have the same shape")
+    
+    mask = np.asarray(mask, dtype=np.float64)
+    if mask.ndim == 2 and ambient_joint.ndim == 3:
+        mask = mask[..., None]
+
+    return (1.0 - mask) * ambient_joint + mask * ambient_base
+
+def detail_transfer(
+    ambient_joint: Array,
+    ambient_base: Array,
+    flash_detail: Array,
+    mask: Array,
+) -> Array:
+    """Final image with flash-to-ambient detail transfer.
+    Equation mapping
+    ----------------
+    Implements Eq. (7):
+        A_final = (1 - M) * A_NR * F_detail + M * A_base
+    """
+    if not (ambient_joint.shape == ambient_base.shape == flash_detail.shape):
+        raise ValueError(
+            "ambient_joint, ambient_base, flash_detail must have matching shapes"
+        )
 
     mask = np.asarray(mask, dtype=np.float64)
     if mask.ndim == 2 and ambient_joint.ndim == 3:
@@ -251,11 +197,10 @@ def merge_denoised_with_mask(
     if mask.shape[:2] != ambient_joint.shape[:2]:
         raise ValueError("mask spatial dimensions must match image")
 
-    return (1.0 - mask) * ambient_joint + mask * ambient_base
+    return (1.0 - mask) * ambient_joint * flash_detail + mask * ambient_base
 
 
-
-def denoise_pipeline(
+def flash_no_flash_pipeline(
     ambient: Array,
     flash: Array,
     sigma_d: float = 3.0,
@@ -281,8 +226,7 @@ def denoise_pipeline(
     If ambient_linear or flash_linear are not provided, the function falls back to a
     zero artifact mask and returns the raw joint-bilateral result as the final output.
     """
-    ambient = _ensure_float_image(ambient)
-    flash = _ensure_float_image(flash)
+
     if ambient.shape != flash.shape:
         raise ValueError("ambient and flash must have the same shape")
 
@@ -301,20 +245,28 @@ def denoise_pipeline(
     )
 
     if ambient_linear is None or flash_linear is None:
-        shadow_mask = np.zeros(ambient.shape[:2], dtype=np.float64)
-        specularity_mask = np.zeros(ambient.shape[:2], dtype=np.float64)
-        artifact_mask = np.zeros(ambient.shape[:2], dtype=np.float64)
-        denoised = ambient_joint.copy()
-    else:
-        shadow_mask, specularity_mask, artifact_mask = detect_flash_artifact_mask(
-            ambient_linear=ambient_linear,
-            flash_linear=flash_linear,
-            tau_shadow=tau_shadow,
-            saturation_threshold=saturation_threshold,
-            morph_radius=morph_radius,
-            feather_radius=feather_radius,
-        )
-        denoised = merge_denoised_with_mask(ambient_joint, ambient_base, artifact_mask)
+        ambient_linear = srgb_to_linear(ambient)
+        flash_linear = srgb_to_linear(flash)
+        scale = flash_linear.mean() / (ambient_linear.mean() + 1e-12)
+        ambient_linear *= scale
+
+    shadow_mask, specularity_mask, artifact_mask = detect_flash_artifact_mask(
+        ambient_linear=ambient_linear,
+        flash_linear=flash_linear,
+        tau_shadow=tau_shadow,
+        saturation_threshold=saturation_threshold,
+        morph_radius=morph_radius,
+        feather_radius=feather_radius,
+    )
+
+    flash_detail = compute_detail_layer(
+        flash,
+        sigma_d=sigma_d,
+        sigma_r=sigma_r_joint,
+        epsilon=0.02,
+        radius=radius,
+    )
+    result = detail_transfer(ambient_joint, ambient_base, flash_detail, artifact_mask)
 
     return DenoisingResult(
         ambient_base=ambient_base,
@@ -322,16 +274,19 @@ def denoise_pipeline(
         shadow_mask=shadow_mask,
         specularity_mask=specularity_mask,
         artifact_mask=artifact_mask,
-        denoised=denoised,
+        result=result,
     )
 
 
 __all__ = [
     "DenoisingResult",
+    "srgb_to_linear",
     "linearize_ambient_to_flash_space",
     "detect_shadow_mask",
     "detect_specularity_mask",
     "detect_flash_artifact_mask",
+    "compute_detail_layer",
+    "detail_transfer",
     "merge_denoised_with_mask",
-    "denoise_pipeline",
+    "flash_no_flash_pipeline",
 ]

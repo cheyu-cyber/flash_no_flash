@@ -17,67 +17,19 @@ import numpy as np
 
 Array = np.ndarray
 
-
-
-def _ensure_float_image(image: Array) -> Array:
-    image = np.asarray(image, dtype=np.float64)
-    if image.ndim not in (2, 3):
-        raise ValueError("image must be HxW or HxWxC")
-    return image
-
-
-
-def _to_channel_last(image: Array) -> tuple[Array, bool]:
-    """Return HxWxC image and whether the input was grayscale."""
-    image = _ensure_float_image(image)
-    if image.ndim == 2:
-        return image[..., None], True
-    return image, False
-
-
-
-def _from_channel_last(image: Array, squeeze_gray: bool) -> Array:
-    if squeeze_gray:
-        return image[..., 0]
-    return image
-
-
-
 def _gaussian(x: Array | float, sigma: float) -> Array | float:
     if sigma <= 0:
         raise ValueError("sigma must be positive")
     return np.exp(-(np.asarray(x) ** 2) / (2.0 * sigma * sigma))
 
-
-
 def _default_radius(sigma_d: float) -> int:
     return max(1, int(np.ceil(3.0 * sigma_d)))
-
-
 
 def _spatial_kernel(radius: int, sigma_d: float) -> Array:
     ys, xs = np.mgrid[-radius : radius + 1, -radius : radius + 1]
     dist2 = xs * xs + ys * ys
     kernel = np.exp(-dist2 / (2.0 * sigma_d * sigma_d))
     return np.asarray(kernel, dtype=np.float64)
-
-
-
-def _reflect_pad(image: Array, radius: int) -> Array:
-    if image.ndim == 2:
-        return np.pad(image, ((radius, radius), (radius, radius)), mode="reflect")
-    return np.pad(image, ((radius, radius), (radius, radius), (0, 0)), mode="reflect")
-
-
-
-def _range_distance(center: Array, neighborhood: Array) -> Array:
-    """Return scalar intensity or RGB Euclidean difference per neighbor."""
-    diff = neighborhood - center
-    if diff.ndim == 2:
-        return np.abs(diff)
-    return np.linalg.norm(diff, axis=-1)
-
-
 
 def bilateral_filter(
     image: Array,
@@ -138,7 +90,23 @@ def bilateral_filter(
             out[y, x] = np.sum(weighted_patch, axis=(0, 1)) / norm 
     return out
 
+def bilateral_filter_luminance(
+    image: Array,
+    sigma_d: float,
+    sigma_r: float,
+    radius: Optional[int] = None,
+) -> Array:
+    """Apply the paper's bilateral filter to the luminance channel only.
 
+    Works for any channel-last 3-channel image whose **first channel** is
+    luminance — i.e. YCbCr (Y), Lab (L), or YUV (Y). The two chroma channels
+    are passed through unchanged. Caller is responsible for the RGB <-> target
+    conversion.
+    """
+    y_filtered = bilateral_filter(image[..., :1], sigma_d, sigma_r, radius)
+    out = image.copy()
+    out[..., :1] = y_filtered
+    return out
 
 def joint_bilateral_filter(
     ambient: Array,
@@ -198,8 +166,29 @@ def joint_bilateral_filter(
 
     return out
 
+def joint_bilateral_filter_luminance(
+    ambient: Array,
+    flash: Array,
+    sigma_d: float,
+    sigma_r: float,
+    radius: Optional[int] = None,
+) -> Array:
+    """Apply the paper's joint bilateral filter to the luminance channel only.
+
+    Works for any channel-last 3-channel image whose first channel is
+    luminance (YCbCr, Lab, YUV). Chroma channels of `ambient` pass through.
+    """
+    y_filtered = joint_bilateral_filter(
+        ambient[..., :1], flash[..., :1], sigma_d, sigma_r, radius
+    )
+    out = ambient.copy()
+    out[..., :1] = y_filtered
+    return out
+
 
 __all__ = [
     "bilateral_filter",
+    "bilateral_filter_luminance",
     "joint_bilateral_filter",
+    "joint_bilateral_filter_luminance",
 ]

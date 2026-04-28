@@ -1,17 +1,19 @@
-"""
-Hand-written image quality metrics: MSE, PSNR, and SSIM.
-
-These mirror the behaviour of skimage.metrics but are implemented from
-scratch so every step is transparent and editable.
-"""
-
 import numpy as np
 from scipy.ndimage import uniform_filter
 
 
 # ---------------------------------------------------------------------------
-# MSE
+# L1 Error
 # ---------------------------------------------------------------------------
+def L1_error(image_true, image_test):
+    """L1 Error between two images.
+
+    L1 = (1/N) * sum(|image_true - image_test|)
+    """
+    image_true = np.asarray(image_true, dtype=np.float64)
+    image_test = np.asarray(image_test, dtype=np.float64)
+    return np.mean(np.abs(image_true - image_test))
+
 def mean_squared_error(image_true, image_test):
     """Mean Squared Error between two images.
 
@@ -20,7 +22,6 @@ def mean_squared_error(image_true, image_test):
     image_true = np.asarray(image_true, dtype=np.float64)
     image_test = np.asarray(image_test, dtype=np.float64)
     return np.mean((image_true - image_test) ** 2)
-
 
 # ---------------------------------------------------------------------------
 # PSNR
