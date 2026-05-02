@@ -247,7 +247,7 @@ def flash_no_flash_pipeline(
     if ambient_linear is None or flash_linear is None:
         ambient_linear = srgb_to_linear(ambient)
         flash_linear = srgb_to_linear(flash)
-        scale = flash_linear.mean() / (ambient_linear.mean() + 1e-12)
+        scale = ambient_linear.mean() / (flash_linear.mean() + 1e-12)
         ambient_linear *= scale
 
     shadow_mask, specularity_mask, artifact_mask = detect_flash_artifact_mask(

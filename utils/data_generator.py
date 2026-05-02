@@ -451,11 +451,10 @@ class FlashNoFlashGenerator:
         base = np.full((H, W), self._p["base_illumination"], dtype=np.float64)
         variation = self.rng.normal(0, self._p["illumination_variation"], size=(H, W))
         variation = gaussian_filter(variation, sigma=40.0)
-        fill = np.clip(base + variation, 0.02, 0.4)
+        fill = base + variation
 
-        # Expand to 3 channels and tint by the scene's true ambient colour
-        # temperature (Kelvin). This cast is part of the clean target — the
-        # model should reconstruct it, not undo it.
+        # Color tint. This cast is part of the clean target. 
+        # Model should reconstruct it, not undo it.
         ambient_light = fill[:, :, None] * self._p["base_color_tint"][None, None, :]
 
         # ----------------------------------------------------------

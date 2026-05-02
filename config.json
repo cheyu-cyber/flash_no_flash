@@ -17,8 +17,8 @@
 
     "flash": {
         "flash_power": [600.0, 1100.0],
-        "flash_position_x": [200, 312],
-        "flash_position_y": [200, 312],
+        "flash_position_x": [312, 712],
+        "flash_position_y": [184, 584],
         "flash_position_z": [0.0, 0.0],
         "falloff_exponent": [1.0, 1.5],
         "specular_strength": [0.3, 0.9],
@@ -29,13 +29,13 @@
     },
 
     "ambient": {
-        "base_illumination": [0.3, 0.6],
+        "base_illumination": [0.3, 0.5],
         "illumination_variation": [0.04, 0.12],
         "color_temperature": [2700, 6500],
         "color_temperature_shift": [[0.9, 1.1], [0.9, 1.1], [0.9, 1.1]],
 
         "num_room_lights_range": [0, 5],
-        "room_light_power": [0.5, 0.8],
+        "room_light_power": [0.1, 0.4],
         "room_light_depth": [-3.0, 0.0],
         "room_light_falloff": [0.5, 1.0],
         "room_light_softness": 60.0,
@@ -54,8 +54,8 @@
     },
 
     "generation": {
-        "num_train": 2000,
-        "num_val": 500,
+        "num_train": 10,
+        "num_val": 10,
         "output_dir": "./data/synthetic"
     },
 

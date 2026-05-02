@@ -20,14 +20,7 @@ def _to_gray_uint8(img: np.ndarray) -> np.ndarray:
 
 
 def _auto_canny(img: np.ndarray, sigma: float = 0.33) -> np.ndarray:
-    """Canny with thresholds derived from the per-image median.
-
-    Flash and no-flash frames have very different exposure, so a fixed
-    pair of thresholds leaves the dark image with far fewer edges than
-    the bright one — that density mismatch weakens NCC. Computing the
-    thresholds independently from each image's median balances the two
-    edge maps.
-    """
+    """ Canny with thresholds derived from the per-image median. """
     med = float(np.median(img))
     lo = int(max(0, (1.0 - sigma) * med))
     hi = int(min(255, (1.0 + sigma) * med))

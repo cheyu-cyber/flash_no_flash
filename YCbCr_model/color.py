@@ -1,20 +1,10 @@
-"""Color-space conversions between RGB and YCbCr (BT.601, full-range).
-
-All tensors are expected in CHW (or NCHW) layout with values in [0, 1].
-Outputs stay in [0, 1] — the Cb/Cr channels are shifted by +0.5 so that
-neutral gray maps to (Y=gray, Cb=0.5, Cr=0.5).
-"""
-
 from __future__ import annotations
 
 import torch
 
 
 def rgb_to_ycbcr(rgb: torch.Tensor) -> torch.Tensor:
-    """Convert an RGB tensor in [0,1] to YCbCr in [0,1].
-
-    Accepts (..., 3, H, W). Returns a tensor of the same shape.
-    """
+    """ Convert an RGB tensor in [0,1] to YCbCr in [0,1]. """
     r = rgb[..., 0:1, :, :]
     g = rgb[..., 1:2, :, :]
     b = rgb[..., 2:3, :, :]
