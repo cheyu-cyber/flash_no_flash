@@ -1,10 +1,10 @@
 {
-    "image_size": [768, 1024],
+    "image_size": [1536, 2048],
     "seed": 1869,
 
     "camera": {
-        "fov_h": 60.0,
-        "fov_w": 80.0
+        "fov_h": 54.0,
+        "fov_w": 72.0
     },
 
     "scene": {
@@ -17,8 +17,8 @@
 
     "flash": {
         "flash_power": [600.0, 1100.0],
-        "flash_position_x": [312, 712],
-        "flash_position_y": [184, 584],
+        "flash_position_x": [824, 1224],
+        "flash_position_y": [568, 968],
         "flash_position_z": [0.0, 0.0],
         "falloff_exponent": [1.0, 1.5],
         "specular_strength": [0.3, 0.9],
@@ -29,10 +29,10 @@
     },
 
     "ambient": {
-        "base_illumination": [0.3, 0.5],
+        "base_illumination": [0.3, 0.6],
         "illumination_variation": [0.04, 0.12],
         "color_temperature": [2700, 6500],
-        "color_temperature_shift": [[0.9, 1.1], [0.9, 1.1], [0.9, 1.1]],
+        "color_temperature_shift": [[0.95, 1.05], [0.95, 1.05], [0.95, 1.05]],
 
         "num_room_lights_range": [0, 5],
         "room_light_power": [0.1, 0.4],
@@ -43,7 +43,7 @@
         "fog_strength": [0.0, 0.15],
         "fog_color": [0.75, 0.75, 0.75],
 
-        "no_flash_darken": [0.2, 0.5]
+        "no_flash_darken": [0.1, 0.3]
     },
 
     "noise": {
@@ -53,9 +53,17 @@
         "poisson_peak": [120.0, 300.0]
     },
 
+    "misalignment": {
+        "max_shift_px": [1, 30]
+    },
+
+    "motion_blur": {
+        "max_length_px": [0, 30]
+    },
+
     "generation": {
-        "num_train": 10,
-        "num_val": 10,
+        "num_train": 16000,
+        "num_val": 2000,
         "output_dir": "./data/synthetic"
     },
 
@@ -67,11 +75,9 @@
         "batch_size": 2,
         "learning_rate": 1e-4,
         "weight_decay": 1e-5,
-        "num_epochs": 350,
+        "num_epochs": 250,
         "loss_l1_weight": 1.0,
-        "loss_ssim_weight": 0.3,
-        "loss_perceptual_weight": 0.5,
-        "loss_gate_reg_weight": 0.0,
+        "loss_ssim_weight": 0.5,
         "checkpoint_dir": "./checkpoints",
         "log_interval": 10,
         "val_interval": 5,
@@ -87,7 +93,7 @@
         "batch_size": 2,
         "learning_rate": 1e-4,
         "weight_decay": 1e-5,
-        "num_epochs": 350,
+        "num_epochs": 250,
         "loss_l1_weight": 1.0,
         "loss_ssim_weight": 0.3,
         "loss_gate_reg_weight": 0.0,

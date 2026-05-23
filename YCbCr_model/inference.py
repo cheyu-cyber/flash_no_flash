@@ -5,11 +5,13 @@ both happen in RGB so the visualisations look natural.
 
 Outputs (all under ``logs_ycbcr/visualizations/``):
 
-* ``real/<name>_full.png``       — model output only, 1024x768.
+* ``real/<name>_full.png``       — model output only, at the model's
+                                   working resolution (``cfg.image_size``).
 * ``real/<name>_combined.png``   — 2x4 grid:
     row 1: flash | no_flash | ours | petschnigg (or blank)
     row 2: gate L0 | gate L1 | gate L2 | gate L3
-* ``synthetic/<idx>_full.png``      — model output only, 1024x768.
+* ``synthetic/<idx>_full.png``      — model output only, at the model's
+                                      working resolution (``cfg.image_size``).
 * ``synthetic/<idx>_combined.png``  — 2x4 grid:
     row 1: flash | no_flash | ours | no_flash_clean
     row 2: gate L0 | gate L1 | gate L2 | gate L3
@@ -42,7 +44,6 @@ from model.align import align_pair_and_crop
 
 REAL_DATA_DIR = Path("data/real_data")
 OUT_ROOT = Path("logs_ycbcr/visualizations")
-OUTPUT_W, OUTPUT_H = 1024, 768
 N_SYNTHETIC = 5
 # Camera handheld between flash/no-flash shots → register no-flash to flash
 # before feeding the pair to the model. Synthetic pairs are pixel-perfect.
@@ -224,8 +225,7 @@ def main() -> None:
             fourth = None
             fourth_title = "(no Petschnigg)"
 
-        out_full = cv2.resize(output_np, (OUTPUT_W, OUTPUT_H), interpolation=cv2.INTER_CUBIC) \
-            if (in_w, in_h) != (OUTPUT_W, OUTPUT_H) else output_np
+        out_full = output_np
         save_full_output(real_dir / f"{name}_full.png", out_full)
 
         save_combined(
@@ -269,8 +269,7 @@ def main() -> None:
         mse = float(np.mean((output_np - target_np) ** 2))
         psnr = 10.0 * math.log10(1.0 / max(mse, 1e-10))
 
-        out_full = cv2.resize(output_np, (OUTPUT_W, OUTPUT_H), interpolation=cv2.INTER_CUBIC) \
-            if output_np.shape[:2] != (OUTPUT_H, OUTPUT_W) else output_np
+        out_full = output_np
         save_full_output(syn_dir / f"{i:03d}_full.png", out_full)
 
         save_combined(

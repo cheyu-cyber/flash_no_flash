@@ -15,10 +15,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 
+import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from utils.config import load_config
+from utils.ddp import (
+    barrier,
+    cleanup_ddp,
+    init_ddp,
+    is_main,
+    local_rank,
+    rank,
+    reduce_mean,
+    world_size,
+)
 from model.network import GatedUNet
 from model.dataset import FlashNoFlashDataset
 from model.losses import CombinedLoss
@@ -88,27 +101,35 @@ def gate_stats(gates: List[torch.Tensor]) -> dict:
 def save_checkpoint(
     path: Path,
     epoch: int,
-    model: GatedUNet,
+    raw_model: GatedUNet,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     best_val_loss: float,
 ) -> None:
-    """Save a training checkpoint with all state needed to resume."""
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "best_val_loss": best_val_loss,
-        },
-        path,
-    )
+    """Save a training checkpoint with all state needed to resume.
+
+    Only rank 0 writes; other ranks wait on a barrier so they don't race
+    ahead before the file is on disk. ``raw_model`` should be the
+    unwrapped ``GatedUNet`` (not the DDP wrapper) so the on-disk format
+    is identical across single-GPU and multi-GPU runs.
+    """
+    if is_main():
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": raw_model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_loss": best_val_loss,
+            },
+            path,
+        )
+    barrier()
 
 
 def load_checkpoint(
     path: Path,
-    model: GatedUNet,
+    raw_model: GatedUNet,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: torch.device,
@@ -116,10 +137,12 @@ def load_checkpoint(
 ) -> tuple[int, float]:
     """Load a checkpoint and restore model/optimizer/scheduler state.
 
-    Returns (start_epoch, best_val_loss).
+    All ranks call this with their local ``device`` mapping; DDP's first
+    forward will broadcast-sync any drifted parameters. Returns
+    (start_epoch, best_val_loss).
     """
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    raw_model.load_state_dict(ckpt["model_state_dict"])
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if "scheduler_state_dict" in ckpt:
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
@@ -147,7 +170,7 @@ def train_one_epoch(
     logger: logging.Logger,
 ) -> dict:
     model.train()
-    running = {"l1": 0.0, "ssim": 0.0, "gate_entropy": 0.0, "total": 0.0}
+    running = {"l1": 0.0, "ssim": 0.0, "total": 0.0}
     running_gates: dict[str, float] = {}
     n_batches = 0
 
@@ -172,16 +195,17 @@ def train_one_epoch(
 
         n_batches += 1
 
-        if (i + 1) % log_interval == 0:
+        if (i + 1) % log_interval == 0 and is_main():
             avg = {k: v / n_batches for k, v in running.items()}
             logger.info(
                 f"  [epoch {epoch+1} | batch {i+1}/{len(loader)}] "
-                f"loss={avg['total']:.4f}  l1={avg['l1']:.4f}  ssim={avg['ssim']:.4f}  "
-                f"gate={avg['gate_entropy']:.4f}"
+                f"loss={avg['total']:.4f}  l1={avg['l1']:.4f}  ssim={avg['ssim']:.4f}"
             )
 
-    avg_losses = {k: v / max(n_batches, 1) for k, v in running.items()}
-    avg_gates = {k: v / max(n_batches, 1) for k, v in running_gates.items()}
+    # Per-rank averages, then all-reduce to global means so the scheduler
+    # and CSV logger see consistent numbers across ranks.
+    avg_losses = {k: reduce_mean(v / max(n_batches, 1), device) for k, v in running.items()}
+    avg_gates = {k: reduce_mean(v / max(n_batches, 1), device) for k, v in running_gates.items()}
     return {**avg_losses, **avg_gates}
 
 
@@ -193,7 +217,7 @@ def validate(
     device: torch.device,
 ) -> dict:
     model.eval()
-    running = {"l1": 0.0, "ssim": 0.0, "gate_entropy": 0.0, "total": 0.0, "psnr": 0.0}
+    running = {"l1": 0.0, "ssim": 0.0, "total": 0.0, "psnr": 0.0}
     running_gates: dict[str, float] = {}
     n_batches = 0
 
@@ -215,19 +239,48 @@ def validate(
 
         n_batches += 1
 
-    avg_losses = {k: v / max(n_batches, 1) for k, v in running.items()}
-    avg_gates = {k: v / max(n_batches, 1) for k, v in running_gates.items()}
+    avg_losses = {k: reduce_mean(v / max(n_batches, 1), device) for k, v in running.items()}
+    avg_gates = {k: reduce_mean(v / max(n_batches, 1), device) for k, v in running_gates.items()}
     return {**avg_losses, **avg_gates}
 
 
 def main() -> None:
+    # ---------- distributed init ----------
+    # No-op in single-GPU mode; reads LOCAL_RANK/RANK/WORLD_SIZE if torchrun
+    # set them. After this, world_size()/rank()/local_rank() return the
+    # right values for either mode.
+    init_ddp()
+    try:
+        _train_main()
+    finally:
+        cleanup_ddp()
+
+
+def _train_main() -> None:
     cfg = load_config()
     mcfg = cfg.model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Bind this process to a specific GPU when running under torchrun;
+    # otherwise local_rank() returns 0 and we get the legacy cuda:0.
+    device = torch.device(
+        f"cuda:{local_rank()}" if torch.cuda.is_available() else "cpu"
+    )
 
-    # ---------- logging ----------
+    # Per-rank seeding so each rank draws different augmentations and
+    # different per-step random ops; reproducible per (rank, cfg.seed).
+    torch.manual_seed(cfg.seed + rank())
+    np.random.seed(cfg.seed + rank())
+
+    # ---------- logging (rank-0 only) ----------
     log_dir = Path("logs")
-    logger = setup_logging(log_dir)
+    if is_main():
+        logger = setup_logging(log_dir)
+    else:
+        # Other ranks get a silent logger so logger.info calls are no-ops
+        # without having to guard every one.
+        logger = logging.getLogger(f"train_rank{rank()}")
+        logger.handlers.clear()
+        logger.addHandler(logging.NullHandler())
+        logger.setLevel(logging.WARNING)
 
     # Determine gate column names from encoder config
     n_levels = len(mcfg.encoder_channels)
@@ -235,18 +288,23 @@ def main() -> None:
     for lvl in range(n_levels):
         gate_cols += [f"gate_L{lvl}_flash", f"gate_L{lvl}_noflash"]
 
-    csv_logger = CSVLogger(
-        log_dir / "metrics.csv",
-        fieldnames=[
-            "epoch", "lr", "elapsed_s",
-            "train_loss", "train_l1", "train_ssim", "train_gate_entropy",
-            *[f"train_{c}" for c in gate_cols],
-            "val_loss", "val_l1", "val_ssim", "val_gate_entropy", "val_psnr",
-            *[f"val_{c}" for c in gate_cols],
-        ],
-    )
+    csv_logger = None
+    if is_main():
+        csv_logger = CSVLogger(
+            log_dir / "metrics.csv",
+            fieldnames=[
+                "epoch", "lr", "elapsed_s",
+                "train_loss", "train_l1", "train_ssim",
+                *[f"train_{c}" for c in gate_cols],
+                "val_loss", "val_l1", "val_ssim", "val_psnr",
+                *[f"val_{c}" for c in gate_cols],
+            ],
+        )
 
-    logger.info(f"Device: {device}")
+    logger.info(
+        f"Device: {device}  |  rank {rank()}/{world_size()}  "
+        f"(local_rank={local_rank()})"
+    )
 
     # ---------- data ----------
     data_root = Path(cfg.generation.output_dir)
@@ -254,10 +312,26 @@ def main() -> None:
     val_ds = FlashNoFlashDataset(data_root / "val", augment=False)
     logger.info(f"Train samples: {len(train_ds)}  |  Val samples: {len(val_ds)}")
 
+    # DistributedSampler shards the dataset across ranks; in single-GPU
+    # mode we fall back to plain shuffle.
+    if world_size() > 1:
+        train_sampler = DistributedSampler(
+            train_ds, num_replicas=world_size(), rank=rank(), shuffle=True
+        )
+        val_sampler = DistributedSampler(
+            val_ds, num_replicas=world_size(), rank=rank(), shuffle=False
+        )
+        train_shuffle = False  # the sampler handles shuffling
+    else:
+        train_sampler = None
+        val_sampler = None
+        train_shuffle = True
+
     train_loader = DataLoader(
         train_ds,
         batch_size=mcfg.batch_size,
-        shuffle=True,
+        shuffle=train_shuffle,
+        sampler=train_sampler,
         num_workers=mcfg.num_workers,
         pin_memory=True,
     )
@@ -265,18 +339,30 @@ def main() -> None:
         val_ds,
         batch_size=mcfg.batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=mcfg.num_workers,
         pin_memory=True,
     )
 
     # ---------- model ----------
-    model = GatedUNet(mcfg).to(device)
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    raw_model = GatedUNet(mcfg).to(device)
+    n_params = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
     logger.info(f"Model parameters: {n_params:,}")
+
+    # Wrap in DDP only when actually running multi-GPU; keep ``raw_model``
+    # around for state-dict access so checkpoint format stays identical.
+    if world_size() > 1:
+        model: nn.Module = nn.parallel.DistributedDataParallel(
+            raw_model,
+            device_ids=[local_rank()],
+            output_device=local_rank(),
+        )
+    else:
+        model = raw_model
 
     # ---------- optimiser & scheduler ----------
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=mcfg.learning_rate, weight_decay=mcfg.weight_decay
+        raw_model.parameters(), lr=mcfg.learning_rate, weight_decay=mcfg.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -290,7 +376,9 @@ def main() -> None:
 
     # ---------- checkpoint dir ----------
     ckpt_dir = Path(mcfg.checkpoint_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if is_main():
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+    barrier()
 
     # ---------- resume from checkpoint ----------
     start_epoch = 0
@@ -299,13 +387,18 @@ def main() -> None:
         resume_path = Path(mcfg.resume_checkpoint)
         if resume_path.exists():
             start_epoch, best_val_loss = load_checkpoint(
-                resume_path, model, optimizer, scheduler, device, logger
+                resume_path, raw_model, optimizer, scheduler, device, logger
             )
         else:
             logger.warning(f"Checkpoint not found: {resume_path} — training from scratch")
 
     # ---------- training loop ----------
     for epoch in range(start_epoch, mcfg.num_epochs):
+        # Per-epoch shuffle seed for the DistributedSampler (no-op in
+        # single-GPU mode where the sampler is None).
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
         t0 = time.time()
         train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch, mcfg.log_interval, logger
@@ -333,7 +426,6 @@ def main() -> None:
             "train_loss": f"{train_metrics['total']:.6f}",
             "train_l1": f"{train_metrics['l1']:.6f}",
             "train_ssim": f"{train_metrics['ssim']:.6f}",
-            "train_gate_entropy": f"{train_metrics['gate_entropy']:.6f}",
         }
         for c in gate_cols:
             csv_row[f"train_{c}"] = f"{train_metrics.get(c, 0):.6f}"
@@ -356,7 +448,6 @@ def main() -> None:
             csv_row["val_loss"] = f"{val_metrics['total']:.6f}"
             csv_row["val_l1"] = f"{val_metrics['l1']:.6f}"
             csv_row["val_ssim"] = f"{val_metrics['ssim']:.6f}"
-            csv_row["val_gate_entropy"] = f"{val_metrics['gate_entropy']:.6f}"
             csv_row["val_psnr"] = f"{val_metrics['psnr']:.4f}"
             for c in gate_cols:
                 csv_row[f"val_{c}"] = f"{val_metrics.get(c, 0):.6f}"
@@ -365,7 +456,7 @@ def main() -> None:
                 best_val_loss = val_metrics["total"]
                 save_checkpoint(
                     ckpt_dir / "best.pt", epoch + 1,
-                    model, optimizer, scheduler, best_val_loss,
+                    raw_model, optimizer, scheduler, best_val_loss,
                 )
                 logger.info(f"  Saved best checkpoint (val_loss={best_val_loss:.4f})")
 
@@ -377,19 +468,21 @@ def main() -> None:
         if new_lr < lr:
             logger.info(f"  LR decreased: {lr:.2e} -> {new_lr:.2e}")
 
-        csv_logger.log(csv_row)
+        if csv_logger is not None:
+            csv_logger.log(csv_row)
 
         save_checkpoint(
             ckpt_dir / "latest.pt", epoch + 1,
-            model, optimizer, scheduler, best_val_loss,
+            raw_model, optimizer, scheduler, best_val_loss,
         )
 
     # Save final checkpoint
     save_checkpoint(
         ckpt_dir / "last.pt", mcfg.num_epochs,
-        model, optimizer, scheduler, best_val_loss,
+        raw_model, optimizer, scheduler, best_val_loss,
     )
-    csv_logger.close()
+    if csv_logger is not None:
+        csv_logger.close()
     logger.info("Training complete.")
 
 

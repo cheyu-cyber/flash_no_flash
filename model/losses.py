@@ -69,7 +69,7 @@ def ssim(
 # ---------------------------------------------------------------------------
 
 class CombinedLoss(nn.Module):
-    """L1 + SSIM + gate entropy regularisation.
+    """L1 + SSIM reconstruction loss.
 
     Operates on RGB tensors in [0, 1].
     """
@@ -78,7 +78,6 @@ class CombinedLoss(nn.Module):
         super().__init__()
         self.w_l1 = cfg.loss_l1_weight
         self.w_ssim = cfg.loss_ssim_weight
-        self.w_gate = cfg.loss_gate_reg_weight
 
     def forward(
         self,
@@ -92,6 +91,8 @@ class CombinedLoss(nn.Module):
         output : (B, 3, H, W) RGB
         target : (B, 3, H, W) RGB
         gates  : list of (B, C_k, H_k, W_k) gate activations
+                 (accepted for signature compatibility with downstream
+                 code that passes them; not used in the loss).
         """
         # --- L1 ---
         l1 = F.l1_loss(output, target)
@@ -100,23 +101,11 @@ class CombinedLoss(nn.Module):
         ssim_val = ssim(output, target)
         ssim_loss = 1.0 - ssim_val
 
-        # --- Gate entropy (push gates toward 0 or 1) ---
-        eps = 1e-7
-        gate_entropy = torch.tensor(0.0, device=output.device)
-        for g in gates:
-            g_clamped = g.clamp(eps, 1.0 - eps)
-            ent = -(g_clamped * g_clamped.log() + (1 - g_clamped) * (1 - g_clamped).log())
-            gate_entropy = gate_entropy + ent.mean()
-        gate_entropy = gate_entropy / max(len(gates), 1)
-
-        total = (self.w_l1 * l1
-                + self.w_ssim * ssim_loss
-                + self.w_gate * gate_entropy)
+        total = self.w_l1 * l1 + self.w_ssim * ssim_loss
 
         loss_dict = {
             "l1": l1.item(),
             "ssim": ssim_val.item(),
-            "gate_entropy": gate_entropy.item(),
             "total": total.item(),
         }
         return total, loss_dict

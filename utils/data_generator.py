@@ -70,17 +70,29 @@ class FlashNoFlashGenerator:
 
     def __init__(self, cfg: SyntheticDataConfig, rng: np.random.Generator | None = None):
         self.cfg = cfg
-        self.H, self.W = cfg.image_size
+
+        # Final output (target) size requested by the user.
+        self.target_H, self.target_W = cfg.image_size
+
+        # Working size: pad by max possible flash shift on each axis so the
+        # shifted flash crop never falls outside the rendered scene.
+        self.pad = int(max(0, cfg.misalignment.max_shift_px[1]))
+        self.H = self.target_H + 2 * self.pad
+        self.W = self.target_W + 2 * self.pad
+
         self.rng = rng or np.random.default_rng(cfg.seed)
 
-        # Pre-compute pixel coordinate grids
+        # Pre-compute pixel coordinate grids at the working size.
         self.yy, self.xx = np.mgrid[0:self.H, 0:self.W].astype(np.float64)
 
-        # Focal lengths in pixels (pinhole camera model)
+        # Focal lengths in pixels (pinhole camera model). Keyed off the
+        # *target* dimensions so the cropped output's per-pixel FoV is
+        # identical to a non-augmented run; the working image is just a
+        # slight FoV extension on each side that gets cropped away.
         fov_h_rad = np.radians(cfg.camera.fov_h)
         fov_w_rad = np.radians(cfg.camera.fov_w)
-        self.focal_y = (self.H / 2.0) / np.tan(fov_h_rad / 2.0)
-        self.focal_x = (self.W / 2.0) / np.tan(fov_w_rad / 2.0)
+        self.focal_y = (self.target_H / 2.0) / np.tan(fov_h_rad / 2.0)
+        self.focal_x = (self.target_W / 2.0) / np.tan(fov_w_rad / 2.0)
 
         # Per-sample parameters (re-sampled each call to generate())
         self._p = {}
@@ -91,6 +103,28 @@ class FlashNoFlashGenerator:
         fcfg = self.cfg.flash
         acfg = self.cfg.ambient
         ncfg = self.cfg.noise
+        mcfg = self.cfg.misalignment
+        bcfg = self.cfg.motion_blur
+
+        # Flash-branch shift in pixels (no-flash and target stay centred).
+        # Drawn as integers in [-max, +max] for each axis independently.
+        shift_lo, shift_hi = mcfg.max_shift_px
+        if shift_hi > 0:
+            dy_f = int(self.rng.integers(-shift_hi, shift_hi + 1))
+            dx_f = int(self.rng.integers(-shift_hi, shift_hi + 1))
+        else:
+            dy_f, dx_f = 0, 0
+
+        # Handshake motion blur: random direction (uniform angle in
+        # [0, 2*pi)), random length in [blur_lo, blur_hi]. Length 0
+        # disables the kernel for that sample.
+        blur_lo, blur_hi = bcfg.max_length_px
+        if blur_hi > 0:
+            blur_length = int(self.rng.integers(blur_lo, blur_hi + 1))
+            blur_angle = float(self.rng.uniform(0.0, 2.0 * np.pi))
+        else:
+            blur_length = 0
+            blur_angle = 0.0
 
         self._p = {
             "background_depth": r(*self.cfg.scene.background_depth),
@@ -111,6 +145,9 @@ class FlashNoFlashGenerator:
             "ambient_noise_std": r(*ncfg.ambient_noise_std),
             "flash_noise_std": r(*ncfg.flash_noise_std),
             "poisson_peak": r(*ncfg.poisson_peak),
+            "flash_shift": (dy_f, dx_f),
+            "blur_length": blur_length,
+            "blur_angle": blur_angle,
         }
 
     # ------------------------------------------------------------------
@@ -564,6 +601,46 @@ class FlashNoFlashGenerator:
         return np.clip(noisy, 0.0, 1.0)
 
     # ------------------------------------------------------------------
+    # Crop and motion-blur helpers (used by generate())
+    # ------------------------------------------------------------------
+
+    def _crop(self, arr: np.ndarray, dy: int = 0, dx: int = 0) -> np.ndarray:
+        """Crop ``arr`` to ``(target_H, target_W, ...)`` from the working
+        size, with the crop centre offset by ``(dy, dx)`` pixels.
+
+        ``arr`` must have spatial shape ``(self.H, self.W, ...)``. The
+        offset is in pixel units; ``(0, 0)`` returns the centre crop.
+        """
+        y0 = self.pad + dy
+        x0 = self.pad + dx
+        return arr[y0:y0 + self.target_H, x0:x0 + self.target_W]
+
+    def _motion_blur(self, image: np.ndarray, length: int, angle: float) -> np.ndarray:
+        """Apply a 1-D linear motion-blur kernel of ``length`` pixels at
+        ``angle`` radians to ``image`` (H, W, 3) in [0, 1].
+
+        Length 0 returns the input unchanged.
+        """
+        if length <= 0:
+            return image
+        # Build a square kernel that holds a single line of length L
+        # passing through the centre at the requested angle.
+        size = length if length % 2 == 1 else length + 1  # odd, so we have a true centre
+        kernel = np.zeros((size, size), dtype=np.float64)
+        cy = cx = size // 2
+        for t in np.linspace(-(length - 1) / 2.0, (length - 1) / 2.0, num=length):
+            yi = int(round(cy + t * np.sin(angle)))
+            xi = int(round(cx + t * np.cos(angle)))
+            if 0 <= yi < size and 0 <= xi < size:
+                kernel[yi, xi] = 1.0
+        s = kernel.sum()
+        if s <= 0:
+            return image
+        kernel /= s
+        return cv2.filter2D(image, ddepth=-1, kernel=kernel,
+                            borderType=cv2.BORDER_REPLICATE)
+
+    # ------------------------------------------------------------------
     # Full sample generation
     # ------------------------------------------------------------------
 
@@ -571,7 +648,7 @@ class FlashNoFlashGenerator:
         """Generate one flash / no-flash pair with depth map."""
         self._sample_params()
 
-        # 1. Build the underlying scene
+        # 1. Build the underlying scene (at the larger working size).
         reflectance, depth_map, surface_cos = self.build_scene()
 
         # 2. Compute shadow map from depth occlusion
@@ -601,6 +678,28 @@ class FlashNoFlashGenerator:
         # 6. Add noise
         flash_noisy = self._add_noise(flash_clean, self._p["flash_noise_std"])
         no_flash_noisy = self._add_noise(no_flash_degraded, self._p["ambient_noise_std"])
+
+        # 7. Crop to target size. No-flash inputs and target use the centre
+        #    crop; the flash branch uses an offset crop so it is misaligned
+        #    by a few pixels relative to the no-flash pair.
+        dy_f, dx_f = self._p["flash_shift"]
+        reflectance     = self._crop(reflectance)
+        depth_map       = self._crop(depth_map)
+        no_flash_clean  = self._crop(no_flash_clean)
+        no_flash_noisy  = self._crop(no_flash_noisy)
+        shadow_map      = self._crop(shadow_map)
+        specular        = self._crop(specular)
+        flash_clean     = self._crop(flash_clean, dy_f, dx_f)
+        flash_noisy     = self._crop(flash_noisy, dy_f, dx_f)
+
+        # 8. Handshake motion blur on the no-flash *input* only. The
+        #    target stays sharp so the flash branch can serve as a
+        #    deblurring guide.
+        no_flash_noisy = self._motion_blur(
+            no_flash_noisy,
+            self._p["blur_length"],
+            self._p["blur_angle"],
+        )
 
         return SceneSample(
             scene=reflectance,

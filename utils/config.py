@@ -74,10 +74,41 @@ class NoiseConfig:
 
 
 @dataclass
+class MisalignmentConfig:
+    """Inter-frame shift between flash and no-flash branches.
+
+    The generator renders at a working resolution larger than
+    ``image_size`` by ``2 * max(max_shift_px)`` along each axis, then
+    centre-crops the no-flash input and target while shifting only the
+    flash crop. This produces a flash<->no-flash misalignment of a few
+    pixels and is the ``alignment-invariant fusion'' augmentation
+    described in the report's Future Works.
+    """
+    max_shift_px: Tuple[int, int] = (0, 0)
+
+
+@dataclass
+class MotionBlurConfig:
+    """Directional handshake blur applied to the no-flash *input* only.
+
+    Real flash exposures are short enough to freeze motion; real
+    no-flash exposures pick up handshake. The supervised target stays
+    sharp so the flash branch can serve as a deblurring guide.
+    Kernel is a 1-D line of length L at angle theta uniform in
+    [0, 2*pi); displacement is (L*cos(theta), L*sin(theta)).
+    """
+    max_length_px: Tuple[int, int] = (0, 0)
+
+
+@dataclass
 class GenerationConfig:
     num_train: int = 100
     num_val: int = 20
     output_dir: str = "./data/synthetic"
+    # Diagnostic outputs beyond the three required for training
+    # (flash, no_flash, no_flash_clean). Empty list = save the minimum.
+    # Allowed values: "scene", "depth", "shadow", "specular", "flash_clean".
+    save_extras: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -92,8 +123,6 @@ class ModelConfig:
     num_epochs: int = 200
     loss_l1_weight: float = 1.0
     loss_ssim_weight: float = 0.2
-    loss_perceptual_weight: float = 0.1
-    loss_gate_reg_weight: float = 0.01
     checkpoint_dir: str = "./checkpoints"
     resume_checkpoint: str = ""
     log_interval: int = 10
@@ -141,6 +170,8 @@ class SyntheticDataConfig:
     flash: FlashConfig = field(default_factory=FlashConfig)
     ambient: AmbientConfig = field(default_factory=AmbientConfig)
     noise: NoiseConfig = field(default_factory=NoiseConfig)
+    misalignment: MisalignmentConfig = field(default_factory=MisalignmentConfig)
+    motion_blur: MotionBlurConfig = field(default_factory=MotionBlurConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     ycbcr_model: YCbCrModelConfig = field(default_factory=YCbCrModelConfig)
@@ -208,10 +239,21 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
         poisson_peak=tuple(noise_raw.get("poisson_peak", [120.0, 300.0])),
     )
 
+    misalignment_raw = data.get("misalignment", {})
+    misalignment = MisalignmentConfig(
+        max_shift_px=tuple(misalignment_raw.get("max_shift_px", [0, 0])),
+    )
+
+    motion_blur_raw = data.get("motion_blur", {})
+    motion_blur = MotionBlurConfig(
+        max_length_px=tuple(motion_blur_raw.get("max_length_px", [0, 0])),
+    )
+
     generation = GenerationConfig(
         num_train=gen_raw.get("num_train", 100),
         num_val=gen_raw.get("num_val", 20),
         output_dir=gen_raw.get("output_dir", "./data/synthetic"),
+        save_extras=list(gen_raw.get("save_extras", [])),
     )
 
     model_raw = data.get("model", {})
@@ -226,8 +268,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
         num_epochs=model_raw.get("num_epochs", 200),
         loss_l1_weight=model_raw.get("loss_l1_weight", 1.0),
         loss_ssim_weight=model_raw.get("loss_ssim_weight", 0.2),
-        loss_perceptual_weight=model_raw.get("loss_perceptual_weight", 0.1),
-        loss_gate_reg_weight=model_raw.get("loss_gate_reg_weight", 0.01),
         checkpoint_dir=model_raw.get("checkpoint_dir", "./checkpoints"),
         resume_checkpoint=model_raw.get("resume_checkpoint", ""),
         log_interval=model_raw.get("log_interval", 10),
@@ -266,6 +306,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> SyntheticDataConfig:
         flash=flash,
         ambient=ambient,
         noise=noise,
+        misalignment=misalignment,
+        motion_blur=motion_blur,
         generation=generation,
         model=model,
         ycbcr_model=ycbcr_model,
